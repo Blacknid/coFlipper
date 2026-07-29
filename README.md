@@ -41,6 +41,8 @@ Proiectul este organizat pe două componente principale, reflectate și în stru
 
 Separarea celor două componente urmărește un principiu simplu: dispozitivul rămâne executantul operațiunilor de nivel jos, în timp ce agentul concentrează întreaga logică de interpretare și decizie, fiind singurul punct cu care utilizatorul interacționează direct, în limbaj natural.
 
+Comunicarea dintre cele două componente se face prin portul serial USB al Flipper Zero, folosind un protocol text propriu, denumit CFP (coFlipper Protocol) și documentat integral în PROTOCOL.md.
+
 ## Filosofia de proiectare
 
 Un aspect central al acestui proiect este delegarea deciziilor de „cum” către agent, păstrând la nivelul utilizatorului doar formularea intenției — „ce” anume își dorește. Această separare este inspirată din paradigma agenților capabili să opereze instrumente externe (*tool use*), în care limbajul natural devine interfața primară, iar traducerea în comenzi tehnice concrete este responsabilitatea stratului intermediar.
