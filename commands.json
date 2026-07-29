@@ -1,0 +1,229 @@
+{
+  "protocol": "CFP/1",
+  "description": "Catalog de comenzi coFlipper, pe doua nivele. 'device' = comenzi CFP trimise pe portul serial catre Flipper ('cfp <id> <name> [argumente]', vezi /PROTOCOL.md), executate direct de hardware. 'agent' = operatii de nivel inalt, executate pe desktop, care combina una sau mai multe comenzi device cu rationament LLM (Gemini) - aici e partea originala a proiectului, nu in comenzile device luate individual, care replica functii deja existente in firmware-ul Flipper Zero.",
+  "updated": "2026-07-30",
+  "commands": [
+    {
+      "name": "ping",
+      "layer": "device",
+      "category": "core",
+      "description": "Verifica daca serverul CFP de pe Flipper raspunde.",
+      "args": [],
+      "returns": "pong",
+      "status": "implemented"
+    },
+    {
+      "name": "info",
+      "layer": "device",
+      "category": "core",
+      "description": "Numele/modelul dispozitivului Flipper conectat.",
+      "args": [],
+      "returns": "numele modelului hardware",
+      "status": "implemented"
+    },
+    {
+      "name": "device.battery",
+      "layer": "device",
+      "category": "core",
+      "description": "Nivelul curent al bateriei si daca e in incarcare.",
+      "args": [],
+      "returns": "procent baterie, stare incarcare",
+      "status": "planned"
+    },
+    {
+      "name": "device.storage.list",
+      "layer": "device",
+      "category": "core",
+      "description": "Listeaza fisierele salvate pe cardul SD intr-un folder dat (semnale IR/Sub-GHz salvate, carduri NFC salvate etc.).",
+      "args": [
+        { "name": "path", "type": "string", "required": true, "description": "cale pe cardul SD, ex: /ext/subghz" }
+      ],
+      "returns": "lista de nume de fisiere",
+      "status": "planned"
+    },
+    {
+      "name": "subghz.info",
+      "layer": "device",
+      "category": "subghz",
+      "description": "Informatii despre frecventa Sub-GHz curent configurata pe modulul radio.",
+      "args": [],
+      "returns": "frecventa curenta (Hz), modulatie",
+      "status": "stub"
+    },
+    {
+      "name": "subghz.scan",
+      "layer": "device",
+      "category": "subghz",
+      "description": "Scaneaza o lista de frecvente cunoscute si raporteaza pe care se detecteaza activitate (RSSI peste prag).",
+      "args": [
+        { "name": "duration_ms", "type": "integer", "required": false, "description": "durata scanarii, implicit 3000" }
+      ],
+      "returns": "lista de frecvente cu semnal detectat",
+      "status": "planned"
+    },
+    {
+      "name": "subghz.read",
+      "layer": "device",
+      "category": "subghz",
+      "description": "Asculta o frecventa specifica si incearca sa identifice protocolul semnalului capturat (ex: telecomanda poarta, statie meteo).",
+      "args": [
+        { "name": "frequency", "type": "integer", "required": true, "description": "frecventa in Hz, ex: 433920000" },
+        { "name": "timeout_ms", "type": "integer", "required": false, "description": "cat asteapta un semnal, implicit 5000" }
+      ],
+      "returns": "protocol detectat (daca e cunoscut), date brute capturate",
+      "status": "planned"
+    },
+    {
+      "name": "subghz.replay",
+      "layer": "device",
+      "category": "subghz",
+      "description": "Retransmite un semnal Sub-GHz salvat anterior pe cardul SD. Gandit pentru testarea propriilor dispozitive (ex: propria telecomanda de poarta), nu pentru semnale ale altcuiva.",
+      "args": [
+        { "name": "file", "type": "string", "required": true, "description": "cale catre fisierul .sub salvat" }
+      ],
+      "returns": "confirmare transmisie",
+      "status": "planned"
+    },
+    {
+      "name": "ir.info",
+      "layer": "device",
+      "category": "infrared",
+      "description": "Informatii despre ultimul semnal infrarosu receptionat.",
+      "args": [],
+      "returns": "protocol IR, adresa, comanda",
+      "status": "stub"
+    },
+    {
+      "name": "ir.read",
+      "layer": "device",
+      "category": "infrared",
+      "description": "Asteapta si decodeaza urmatorul semnal IR primit (ex: apasarea unei telecomenzi indreptate spre Flipper).",
+      "args": [
+        { "name": "timeout_ms", "type": "integer", "required": false, "description": "cat asteapta un semnal, implicit 5000" }
+      ],
+      "returns": "protocol, adresa, comanda decodificate",
+      "status": "planned"
+    },
+    {
+      "name": "ir.learn",
+      "layer": "device",
+      "category": "infrared",
+      "description": "Invata un semnal IR nou (de la o telecomanda fizica) si il salveaza sub un nume dat, pentru refolosire ulterioara.",
+      "args": [
+        { "name": "name", "type": "string", "required": true, "description": "numele sub care se salveaza semnalul, ex: tv_power" }
+      ],
+      "returns": "confirmare salvare",
+      "status": "planned"
+    },
+    {
+      "name": "ir.send",
+      "layer": "device",
+      "category": "infrared",
+      "description": "Retransmite un semnal IR salvat anterior (functie de telecomanda universala).",
+      "args": [
+        { "name": "name", "type": "string", "required": true, "description": "numele semnalului salvat, ex: tv_power" }
+      ],
+      "returns": "confirmare transmisie",
+      "status": "planned"
+    },
+    {
+      "name": "nfc.info",
+      "layer": "device",
+      "category": "nfc",
+      "description": "Informatii despre ultimul tag NFC citit.",
+      "args": [],
+      "returns": "UID, tip card, protocol",
+      "status": "stub"
+    },
+    {
+      "name": "nfc.read",
+      "layer": "device",
+      "category": "nfc",
+      "description": "Asteapta un tag/card NFC apropiat de Flipper si returneaza UID-ul si tipul lui.",
+      "args": [
+        { "name": "timeout_ms", "type": "integer", "required": false, "description": "cat asteapta un card, implicit 5000" }
+      ],
+      "returns": "UID, tip card (Mifare, NTAG etc.)",
+      "status": "planned"
+    },
+    {
+      "name": "nfc.watch",
+      "layer": "device",
+      "category": "nfc",
+      "description": "Monitorizeaza o perioada de timp toate tag-urile/cardurile NFC care ajung in raza modulului.",
+      "args": [
+        { "name": "duration_ms", "type": "integer", "required": true, "description": "durata monitorizarii in milisecunde" }
+      ],
+      "returns": "lista de UID-uri/tipuri de carduri detectate, in ordine cronologica, cu timestamp",
+      "status": "planned"
+    },
+    {
+      "name": "nfc.emulate",
+      "layer": "device",
+      "category": "nfc",
+      "description": "Emuleaza un card NFC salvat anterior (Flipper-ul se comporta ca acel card fata de un cititor).",
+      "args": [
+        { "name": "name", "type": "string", "required": true, "description": "numele cardului salvat" }
+      ],
+      "returns": "confirmare pornire emulare",
+      "status": "planned"
+    },
+    {
+      "name": "rfid.read",
+      "layer": "device",
+      "category": "rfid",
+      "description": "Citeste un card RFID de joasa frecventa (125 kHz) apropiat de Flipper.",
+      "args": [
+        { "name": "timeout_ms", "type": "integer", "required": false, "description": "cat asteapta un card, implicit 5000" }
+      ],
+      "returns": "ID card, protocol (EM4100, HID etc.)",
+      "status": "planned"
+    },
+    {
+      "name": "agent.explain_subghz_capture",
+      "layer": "agent",
+      "category": "agent",
+      "description": "Traduce in limbaj natural rezultatul brut al unei capturi Sub-GHz: ce tip de dispozitiv e probabil sursa semnalului (telecomanda poarta/masina, senzor, statie meteo etc.), pe baza frecventei, protocolului detectat si a unei baze proprii de corespondente frecventa-protocol-dispozitiv, nu doar afisarea codului brut ca in aplicatia stock Flipper.",
+      "uses": ["subghz.read"],
+      "args": [
+        { "name": "frequency", "type": "integer", "required": true, "description": "frecventa de interogat, in Hz" }
+      ],
+      "returns": "explicatie in limbaj natural + nivelul de incredere al identificarii",
+      "status": "planned"
+    },
+    {
+      "name": "agent.nfc_session_summary",
+      "layer": "agent",
+      "category": "agent",
+      "description": "Ruleaza nfc.watch pe durata specificata si construieste un rezumat in limbaj natural al sesiunii: cate carduri/tag-uri distincte au fost vazute, care s-a repetat, si o presupunere despre contextul de utilizare (ex: 'pare ca telefonul a interactionat de 3 ori cu acelasi cititor, posibil un abonament de transport'). Raspunde exact la ideea initiala a proiectului: sa arate cu ce s-a conectat NFC-ul unui telefon.",
+      "uses": ["nfc.watch"],
+      "args": [
+        { "name": "duration_ms", "type": "integer", "required": true, "description": "durata sesiunii de monitorizare" }
+      ],
+      "returns": "rezumat text + lista structurata a evenimentelor",
+      "status": "planned"
+    },
+    {
+      "name": "agent.identify_ir_device",
+      "layer": "agent",
+      "category": "agent",
+      "description": "Captureaza un semnal IR necunoscut si incearca sa deduca ce tip de aparat/brand l-a emis, pe baza amprentei de timing a protocolului (NEC, RC5, Samsung etc.), oferind si o explicatie a rationamentului, nu doar eticheta de protocol.",
+      "uses": ["ir.read"],
+      "args": [],
+      "returns": "presupunere despre tipul/brandul aparatului + protocol decodificat",
+      "status": "planned"
+    },
+    {
+      "name": "agent.confirm_authorized_action",
+      "layer": "agent",
+      "category": "agent",
+      "description": "Poarta de siguranta obligatorie inaintea oricarei comenzi device care emite/actioneaza asupra lumii reale (subghz.replay, nfc.emulate, ir.send): agentul cere explicit utilizatorului sa confirme ca actioneaza asupra propriului dispozitiv, inainte de a trimite comanda catre Flipper. Nu executa nimic singura, doar valideaza intentia.",
+      "uses": ["subghz.replay", "nfc.emulate", "ir.send"],
+      "args": [
+        { "name": "action", "type": "string", "required": true, "description": "numele comenzii device care urmeaza sa fie trimisa" }
+      ],
+      "returns": "confirmare sau refuz, cu motivul",
+      "status": "planned"
+    }
+  ]
+}

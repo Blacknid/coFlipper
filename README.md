@@ -51,6 +51,10 @@ Un aspect central al acestui proiect este delegarea deciziilor de „cum” căt
 
 Spre deosebire de aplicațiile companion existente pentru Flipper Zero, care expun funcționalitățile dispozitivului printr-o interfață grafică tradițională, coFlipper propune o interfață conversațională ca punct central de interacțiune. Utilizatorul nu navighează manual printr-un meniu de opțiuni, ci descrie rezultatul dorit, iar agentul este cel care alege și înlănțuie operațiile necesare pe dispozitiv.
 
+Este important de precizat unde se află, concret, originalitatea acestui proiect și unde nu se află. Comenzile individuale expuse de Flipper Zero prin protocolul CFP — citirea unui semnal Sub-GHz, decodarea unui semnal infraroșu, citirea sau emularea unui tag NFC — nu sunt originale: ele reproduc funcționalități pe care dispozitivul le are deja, nativ, în aplicațiile sale din fabrică. Catalogul complet al acestor comenzi este documentat în commands.json, sub eticheta `"layer": "device"`.
+
+Originalitatea proiectului se află într-un nivel superior acestora, marcat în același fișier sub eticheta `"layer": "agent"`: operațiile care combină una sau mai multe comenzi de nivel device cu un raționament realizat de modelul de limbaj, pentru a produce un răspuns interpretat, nu doar date brute. De exemplu, în loc să afișeze un cod de protocol Sub-GHz, agentul poate explica, în limbaj natural, ce tip de dispozitiv este probabil sursa semnalului; în loc să listeze UID-uri NFC, poate construi un rezumat al unei sesiuni de monitorizare. Acesta este stratul care nu are, după cunoștințele noastre, un echivalent direct în ecosistemul de aplicații existente pentru Flipper Zero.
+
 ## Stadiul curent și limitări
 
 Proiectul a fost dezvoltat în cadrul probei OPEN a etapei naționale InfoEducație 2026, în intervalul de timp alocat acesteia. Ca urmare, implementarea reflectă un stadiu incipient, de prototip funcțional, concentrat pe validarea conceptului mai degrabă decât pe acoperirea exhaustivă a tuturor capabilităților Flipper Zero. Extinderea și consolidarea proiectului rămân direcții firești pentru o eventuală continuare ulterioară competiției.
