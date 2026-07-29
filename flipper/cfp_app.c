@@ -37,11 +37,29 @@ static void cfp_cli_callback(PipeSide* pipe, FuriString* args, void* context) {
     strncpy(buffer, furi_string_get_cstr(args), sizeof(buffer) - 1);
     buffer[sizeof(buffer) - 1] = '\0';
 
-    char* saveptr = NULL;
-    char* id_token = strtok_r(buffer, " ", &saveptr);
-    char* cmd_token = strtok_r(NULL, " ", &saveptr);
+    /* strtok_r nu e disponibil in API-ul firmware-ului, deci separam manual
+       primele doua token-uri; buffer e o copie locala, deci o putem modifica. */
+    char* cursor = buffer;
+    while(*cursor == ' ')
+        cursor++;
+    char* id_token = cursor;
 
-    if(!id_token || !cmd_token) {
+    while(*cursor && *cursor != ' ')
+        cursor++;
+    char* cmd_token = NULL;
+    if(*cursor) {
+        *cursor++ = '\0';
+        while(*cursor == ' ')
+            cursor++;
+        if(*cursor) {
+            cmd_token = cursor;
+            while(*cursor && *cursor != ' ')
+                cursor++;
+            *cursor = '\0';
+        }
+    }
+
+    if(*id_token == '\0' || !cmd_token) {
         printf(CFP_VERSION " 0 ERR bad_frame\r\n");
         return;
     }

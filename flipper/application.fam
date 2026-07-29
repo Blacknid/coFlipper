@@ -3,6 +3,7 @@ App(
     name="coFlipper CFP Server",
     apptype=FlipperAppType.EXTERNAL,
     entry_point="cfp_app_main",
+    sources=["cfp_app.c"],
     stack_size=2 * 1024,
     fap_category="Tools",
     fap_version="0.1",

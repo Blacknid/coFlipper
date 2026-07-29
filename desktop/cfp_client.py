@@ -5,15 +5,28 @@ import serial.tools.list_ports
 from protocol import CFPClient, CFPError, DEFAULT_BAUDRATE
 
 
+# Flipper Zero se prezinta ca dispozitiv CDC pe baza STM32: VID 0x0483, PID 0x5740.
+# Descrierea portului nu contine mereu "Flipper" (pe Windows apare drept
+# "USB Serial Device"), deci identificarea dupa VID/PID e mai sigura.
+FLIPPER_VID = 0x0483
+FLIPPER_PID = 0x5740
+
+
+def looks_like_flipper(port):
+    if port.vid == FLIPPER_VID and port.pid == FLIPPER_PID:
+        return True
+    return "flipper" in (port.description or "").lower()
+
+
 def pick_port():
     ports = list(serial.tools.list_ports.comports())
     if not ports:
         sys.exit("Niciun port serial gasit. Conecteaza Flipper Zero prin USB.")
 
-    flipper_ports = [p for p in ports if "flipper" in (p.description or "").lower()]
-    candidates = flipper_ports or ports
+    candidates = [p for p in ports if looks_like_flipper(p)] or ports
 
     if len(candidates) == 1:
+        print(f"Flipper detectat pe {candidates[0].device} ({candidates[0].description}).")
         return candidates[0].device
 
     print("Porturi disponibile:")
