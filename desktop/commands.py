@@ -17,6 +17,48 @@ CATALOG_PATH = pathlib.Path(__file__).resolve().parent.parent / "commands.json"
 # them yet, so they have no business being in the model's tool list.
 AVAILABLE_STATUSES = ("implemented", "stub")
 
+# Commands that legitimately block on the device longer than the serial port's default
+# read timeout: nfc.read/nfc.watch wait for a tag to be presented, for as long as the
+# caller's own timeout_ms/duration_ms argument says. Without this, a wait past
+# protocol.DEFAULT_TIMEOUT (2s) would look like a dead connection and raise a spurious
+# CFPError even though the firmware is still legitimately waiting.
+#
+# Maps a command name to (its wait argument, the firmware's own default in ms when that
+# argument is omitted). The default matters: nfc.read's timeout_ms is optional and the
+# firmware falls back to 5000ms on its own when it is not given, so the desktop must widen
+# its read timeout to match even then - otherwise the common case (no explicit timeout_ms)
+# would race the firmware's real 5s wait against the transport's 2s default and lose.
+_WAIT_ARG_BY_COMMAND = {
+    "nfc.read": ("timeout_ms", 5000),
+    "nfc.watch": ("duration_ms", None),  # duration_ms is required; nothing to default
+}
+
+# Added to the device's own wait, in seconds, so the transport timeout does not race the
+# firmware's own deadline - the firmware must always be the one to give up first.
+_WAIT_TIMEOUT_MARGIN_S = 1.5
+
+
+def _read_timeout_for(command_name, call_args):
+    """The widened serial read timeout for one request, or None to use the default.
+
+    None for every command except nfc.read/nfc.watch. For those, the wait comes from the
+    caller's own argument when given, or the firmware's own default wait otherwise (see
+    _WAIT_ARG_BY_COMMAND) - None only when there is truly nothing to wait for (nfc.watch
+    with no duration_ms, which the firmware answers instantly with an error, not a wait).
+    """
+    entry = _WAIT_ARG_BY_COMMAND.get(command_name)
+    if entry is None:
+        return None
+    arg_name, default_ms = entry
+    raw = call_args.get(arg_name)
+    if raw is None:
+        return default_ms / 1000.0 + _WAIT_TIMEOUT_MARGIN_S if default_ms is not None else None
+    try:
+        wait_ms = float(raw)
+    except (TypeError, ValueError):
+        return default_ms / 1000.0 + _WAIT_TIMEOUT_MARGIN_S if default_ms is not None else None
+    return wait_ms / 1000.0 + _WAIT_TIMEOUT_MARGIN_S
+
 _JSON_TYPE_TO_SCHEMA = {
     "string": types.Type.STRING,
     "integer": types.Type.INTEGER,
@@ -345,11 +387,12 @@ class CommandDispatcher:
 
     def _device_request(self, command, call_args):
         args = self._positional_args(command, call_args)
+        timeout = _read_timeout_for(command["name"], call_args)
         try:
             # The lock is held only for the exchange itself, not for the interpretation
             # that follows: a subagent's thinking should not block another's measurement.
             with self._device_lock:
-                data = self._client.request(command["name"], *args)
+                data = self._client.request(command["name"], *args, timeout=timeout)
         except Exception as exc:  # protocol error or serial port error
             outcome = self._result({"status": "error", "error": str(exc)})
         else:

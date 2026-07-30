@@ -5,7 +5,8 @@ App(
     entry_point="cfp_app_main",
     sources=["cfp_app.c"],
     # infrared: the IR bruteforce transmits through infrared_send / InfraredMessage.
-    fap_libs=["infrared"],
+    # nfc: nfc.read/nfc.watch poll a tag through the Nfc/Iso14443_3a poller API.
+    fap_libs=["infrared", "nfc"],
     stack_size=2 * 1024,
     fap_category="Tools",
     fap_version="0.1",

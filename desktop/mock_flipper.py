@@ -629,7 +629,11 @@ class MockCFPClient:
 
         return None
 
-    def request(self, cmd, *args):
+    def request(self, cmd, *args, timeout=None):
+        # Accepted for interface parity with CFPClient.request, which uses it to widen the
+        # serial read timeout for a slow real command (nfc.read/nfc.watch). The mock answers
+        # instantly regardless, so there is nothing to widen.
+        del timeout
         self.calls.append((cmd, args))
         if cmd in IMPLEMENTED:
             return IMPLEMENTED[cmd]

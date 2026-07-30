@@ -33,6 +33,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+import webbrowser
 from tkinter import filedialog
 from tkinter import font as tkfont
 from tkinter import ttk
@@ -180,6 +181,12 @@ class ChatSession:
         # tracks whether each is currently collapsed.
         self._collapse_id = 0
         self._collapsibles = {}
+        # Every clickable URL in the chain (a visited IRDB file, a web search source) gets its
+        # own tag, bound to open the real address in the browser - a running id keeps them apart.
+        self._link_id = 0
+        # tag -> the URL it opens, kept alongside the binding so the mapping can be checked
+        # directly (headless windows cannot always be clicked at pixel coordinates).
+        self._link_urls = {}
         # Streaming state: whether the answer block has been opened (so the streamed,
         # possibly-raw text can be replaced by the cleaned version at the end), and the
         # reasoning step currently typing itself out live in the chain, if any.
@@ -544,6 +551,27 @@ class ChatSession:
         widget.configure(state="disabled")
         widget.see("end")
 
+    def _append_link(self, widget, text, url, base_tag="visit"):
+        """Appends text styled as a link that opens `url` in the browser on click - used for
+        the addresses the agent reached over the network (a visited IRDB file, a web search
+        source), so what the chain shows can actually be followed, not just read."""
+        self._link_id += 1
+        tag = f"link{self._link_id}"
+        self._link_urls[tag] = url
+        widget.configure(state="normal")
+        widget.insert("end", text, (base_tag, tag))
+        widget.configure(state="disabled")
+        widget.see("end")
+        widget.tag_bind(tag, "<Button-1>", lambda _e, u=url: webbrowser.open(u))
+        widget.tag_bind(
+            tag, "<Enter>",
+            lambda _e, t=tag: (widget.configure(cursor="hand2"), widget.tag_configure(t, underline=True)),
+        )
+        widget.tag_bind(
+            tag, "<Leave>",
+            lambda _e, t=tag: (widget.configure(cursor=""), widget.tag_configure(t, underline=False)),
+        )
+
     def handle_event(self, kind, payload):
         """A session-scoped event, arriving on the main thread from the drain loop."""
         if kind == "user":
@@ -652,7 +680,9 @@ class ChatSession:
             if step.visited:
                 self._append(self.chain, f"{pad}{STEP_INDENT}a vizitat baza IRDB:\n", "label")
                 for url in step.visited:
-                    self._append(self.chain, f"{pad}{STEP_INDENT}↗ {url}\n", "visit")
+                    self._append(self.chain, f"{pad}{STEP_INDENT}")
+                    self._append_link(self.chain, f"↗ {url}", url)
+                    self._append(self.chain, "\n")
             self._append(self.chain, "\n")
             self.set_local_status(f"execută {step.name}...", ORANGE)
         elif step.kind == SEARCH:
@@ -665,12 +695,18 @@ class ChatSession:
             for src in step.sources:
                 # Google returns an ugly redirect URI; the clean label is the domain or the
                 # site title. Prefer those, fall back to the URI only if neither is present.
+                # The link still opens the real URI - the label is only for reading.
                 domain, title, uri = src.get("domain"), src.get("title"), src.get("uri")
                 label = domain or title or uri
                 row = f"↗ {label}"
                 if domain and title and title != domain:
                     row += f" — {title}"
-                self._append(self.chain, f"{pad}{STEP_INDENT}{row}\n", "visit")
+                self._append(self.chain, f"{pad}{STEP_INDENT}")
+                if uri:
+                    self._append_link(self.chain, row, uri)
+                else:
+                    self._append(self.chain, row, "visit")
+                self._append(self.chain, "\n")
             self._append(self.chain, "\n")
             self.set_local_status("a căutat pe web…", WEB_BLUE)
         elif step.kind == SPAWN:

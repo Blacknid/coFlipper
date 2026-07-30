@@ -61,16 +61,30 @@ class CFPClient:
     def __exit__(self, *exc_info):
         self.close()
 
-    def request(self, cmd, *args):
+    def request(self, cmd, *args, timeout=None):
+        """Sends one command and waits for its reply.
+
+        timeout, when given, temporarily widens the serial read timeout beyond
+        DEFAULT_TIMEOUT for this one exchange - for a command that legitimately blocks on
+        the device longer than the default allows (nfc.read/nfc.watch wait for a tag to be
+        presented), so the wait does not look like a dead connection. Always restored
+        afterwards, even on error, so it never leaks into unrelated requests.
+        """
         request_id = next(self._ids)
-        self._serial.write(encode_frame(request_id, cmd, args))
-        while True:
-            line = self._serial.readline()
-            if not line:
-                raise CFPError(f"timeout: no response to '{cmd}'")
-            reply = decode_frame(line)
-            if reply is None or reply["id"] != request_id:
-                continue
-            if reply["status"] == "ERR":
-                raise CFPError(" ".join(reply["data"]) or "unknown error")
-            return reply["data"]
+        previous_timeout = self._serial.timeout
+        if timeout is not None:
+            self._serial.timeout = timeout
+        try:
+            self._serial.write(encode_frame(request_id, cmd, args))
+            while True:
+                line = self._serial.readline()
+                if not line:
+                    raise CFPError(f"timeout: no response to '{cmd}'")
+                reply = decode_frame(line)
+                if reply is None or reply["id"] != request_id:
+                    continue
+                if reply["status"] == "ERR":
+                    raise CFPError(" ".join(reply["data"]) or "unknown error")
+                return reply["data"]
+        finally:
+            self._serial.timeout = previous_timeout

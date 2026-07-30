@@ -30,6 +30,8 @@ The model can search the web, through Gemini's native Google Search grounding �
 
 A search is not invisible: like an online IR lookup, it appears in the reasoning chain as its own step (`SEARCH`), showing the queries the model issued and the sources it read — so an answer that leans on the web shows exactly what it read, the same transparency the rest of the chain gives. The grounding metadata (queries and sources) is harvested from the streamed response in `_consume_stream` and recorded by `run_turn`; verified live, the step captured the real query and its sources (Wikipedia and others).
 
+Every address the chain shows — a web search source, a visited IRDB file — is a real link: clicking it opens the page in the system browser, at the actual address (`_append_link` in `gui.py`), not just the cleaned label shown on screen. Verified in a live window: a click on a visited IRDB link, at its real on-screen position, opened the exact URL.
+
 Practical findings from during development, on the free plan:
 
 - the limit is approximately **20 requests per day for each model** among the recent generations (verified on `gemini-3.6-flash` and `gemini-3.5-flash`). A single exchange of messages can consume two or three requests, since every round of tool calls needs an additional request, so the limit is reached quickly;

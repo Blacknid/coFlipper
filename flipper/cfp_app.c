@@ -11,6 +11,9 @@
 #include <infrared.h>
 #include <infrared_transmit.h>
 #include <subghz/devices/cc1101_configs.h>
+#include <nfc/nfc.h>
+#include <nfc/protocols/iso14443_3a/iso14443_3a.h>
+#include <nfc/protocols/iso14443_3a/iso14443_3a_poller_sync.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,6 +34,24 @@
 /* Pause between two transmitted codes. An appliance needs a moment to act on a command
    it accepted, and back-to-back frames are easy for a receiver to miss. */
 #define CFP_IR_GAP_MS 250
+
+/* --- NFC (ISO14443-3A) ----------------------------------------------------------
+   Reads/watches an NFC tag brought close to the Flipper. Deliberately scoped to
+   ISO14443-3A, the base transport layer of Mifare Classic/Mini/Ultralight, NTAG
+   stickers and amiibo - the large majority of tags anyone actually taps. Both
+   commands run synchronously on the CLI thread, exactly like subghz.rssi, just for
+   longer: there is only ever one CFP request in flight at a time, so blocking here
+   is no different in kind, and the desktop widens its own serial read timeout to
+   match before sending either one (see commands.py). Full protocol identification
+   (Mifare Classic vs. DESFire vs. a bank card, ISO15693 tags) and true emulation are
+   out of scope for this pass - nfc.emulate and nfc.stop remain firmware stubs. */
+
+/* How often a pending read/watch retries the card. */
+#define CFP_NFC_POLL_MS 100
+/* How many distinct taps nfc.watch can remember in one session, and the longest one
+   'ms;type;uid' token can be. */
+#define CFP_NFC_MAX_EVENTS 8
+#define CFP_NFC_EVENT_LEN  40
 
 /* --- Wi-Fi dev board (ESP32 Marauder) bridge ----------------------------------
    The wifi.* / ble.* families are not served by the Flipper itself but by an ESP32
@@ -121,6 +142,162 @@ static void cfp_cmd_subghz_rssi(uint32_t id, const char* freq_arg) {
     if(fraction < 0) fraction = -fraction;
 
     printf(CFP_VERSION " %lu OK %lu %ld.%ld\r\n", id, actual, whole, fraction);
+}
+
+/* Encodes 'len' bytes as uppercase hex into 'dst', which must hold at least 2*len+1
+   bytes. Written by hand rather than through snprintf's %X per byte, to keep the loop a
+   single, obviously correct pass with no format-string surprises. */
+static void cfp_hex_encode(char* dst, const uint8_t* src, size_t len) {
+    static const char digits[] = "0123456789ABCDEF";
+    for(size_t i = 0; i < len; i++) {
+        dst[i * 2] = digits[(src[i] >> 4) & 0x0F];
+        dst[i * 2 + 1] = digits[src[i] & 0x0F];
+    }
+    dst[len * 2] = '\0';
+}
+
+/* A tag identifies itself at the transport layer only as UID/ATQA/SAK - what family of
+   chip that belongs to is common industry knowledge, not something the card states
+   outright. This covers the handful of SAK values behind the large majority of tags
+   found in the wild; anything else is reported as an unrecognised card rather than
+   guessed at. Working out what the tag is FOR (an access badge, a transit pass, an
+   amiibo) is the model's job, reasoning from exactly these fields - this only carries
+   them, honestly labelled. CFP tokens cannot contain spaces, so the names are
+   underscore-joined. */
+static void cfp_nfc_describe_sak(uint8_t sak, const char** type_out, const char** bytes_out) {
+    switch(sak) {
+    case 0x08:
+        *type_out = "Mifare_Classic_1K";
+        *bytes_out = "1024";
+        break;
+    case 0x18:
+        *type_out = "Mifare_Classic_4K";
+        *bytes_out = "4096";
+        break;
+    case 0x09:
+        *type_out = "Mifare_Mini";
+        *bytes_out = "320";
+        break;
+    case 0x00:
+        *type_out = "Mifare_Ultralight_or_NTAG";
+        *bytes_out = "unknown";
+        break;
+    case 0x20:
+        *type_out = "ISO14443-4_DESFire_or_JCOP";
+        *bytes_out = "unknown";
+        break;
+    default:
+        *type_out = "unrecognised_ISO14443-3A";
+        *bytes_out = "unknown";
+        break;
+    }
+}
+
+/* nfc.read [timeout_ms] - waits for an ISO14443-3A tag and reports the raw technical
+   facts a reader gets from it (UID, ATQA, SAK), nothing more: what the tag is used for
+   is deduced afterwards, by the model, from exactly these fields. Retries every
+   CFP_NFC_POLL_MS until one answers or timeout_ms runs out (5000 ms by default). */
+static void cfp_cmd_nfc_read(uint32_t id, const char* timeout_arg) {
+    uint32_t timeout_ms = timeout_arg ? (uint32_t)strtoul(timeout_arg, NULL, 10) : 5000;
+    if(timeout_ms == 0) timeout_ms = 5000;
+
+    Nfc* nfc = nfc_alloc();
+    Iso14443_3aData* data = iso14443_3a_alloc();
+
+    bool found = false;
+    uint32_t deadline = furi_get_tick() + furi_ms_to_ticks(timeout_ms);
+    while(furi_get_tick() < deadline) {
+        if(iso14443_3a_poller_sync_read(nfc, data) == Iso14443_3aErrorNone) {
+            found = true;
+            break;
+        }
+        furi_delay_ms(CFP_NFC_POLL_MS);
+    }
+    nfc_free(nfc);
+
+    if(!found) {
+        iso14443_3a_free(data);
+        printf(CFP_VERSION " %lu ERR no_card_detected\r\n", id);
+        return;
+    }
+
+    size_t uid_len = 0;
+    const uint8_t* uid = iso14443_3a_get_uid(data, &uid_len);
+    uint8_t atqa[2];
+    iso14443_3a_get_atqa(data, atqa);
+    uint8_t sak = iso14443_3a_get_sak(data);
+
+    char uid_hex[ISO14443_3A_MAX_UID_SIZE * 2 + 1];
+    cfp_hex_encode(uid_hex, uid, uid_len);
+    char atqa_hex[5];
+    cfp_hex_encode(atqa_hex, atqa, 2);
+
+    const char* type_name;
+    const char* byte_count;
+    cfp_nfc_describe_sak(sak, &type_name, &byte_count);
+
+    iso14443_3a_free(data);
+
+    printf(
+        CFP_VERSION " %lu OK type=%s uid=%s atqa=%s sak=%02X protocol=ISO14443-3A bytes=%s\r\n",
+        id,
+        type_name,
+        uid_hex,
+        atqa_hex,
+        sak,
+        byte_count);
+}
+
+/* nfc.watch <duration_ms> - monitors for the given time and reports, in order, each
+   distinct moment a tag came into range: edge-triggered, so a tag held in place the
+   whole time is one event, not one every poll. Each event is 'ms;type;uid', ms counted
+   from the start of the watch. Passive throughout - it only ever reads. */
+static void cfp_cmd_nfc_watch(uint32_t id, const char* duration_arg) {
+    uint32_t duration_ms = duration_arg ? (uint32_t)strtoul(duration_arg, NULL, 10) : 0;
+    if(duration_ms == 0) {
+        printf(CFP_VERSION " %lu ERR missing_duration\r\n", id);
+        return;
+    }
+
+    Nfc* nfc = nfc_alloc();
+    Iso14443_3aData* data = iso14443_3a_alloc();
+
+    char events[CFP_NFC_MAX_EVENTS][CFP_NFC_EVENT_LEN];
+    size_t event_count = 0;
+    bool was_present = false;
+
+    uint32_t start = furi_get_tick();
+    uint32_t deadline = start + furi_ms_to_ticks(duration_ms);
+    while(furi_get_tick() < deadline) {
+        bool present = iso14443_3a_poller_sync_read(nfc, data) == Iso14443_3aErrorNone;
+        if(present && !was_present && event_count < CFP_NFC_MAX_EVENTS) {
+            size_t uid_len = 0;
+            const uint8_t* uid = iso14443_3a_get_uid(data, &uid_len);
+            char uid_hex[ISO14443_3A_MAX_UID_SIZE * 2 + 1];
+            cfp_hex_encode(uid_hex, uid, uid_len);
+            /* furi_get_tick() already counts milliseconds on this platform - no
+               separate ticks-to-ms conversion is needed. */
+            uint32_t elapsed_ms = furi_get_tick() - start;
+            snprintf(
+                events[event_count],
+                CFP_NFC_EVENT_LEN,
+                "%lu;ISO14443-3A;%s",
+                (unsigned long)elapsed_ms,
+                uid_hex);
+            event_count++;
+        }
+        was_present = present;
+        furi_delay_ms(CFP_NFC_POLL_MS);
+    }
+
+    nfc_free(nfc);
+    iso14443_3a_free(data);
+
+    printf(CFP_VERSION " %lu OK", id);
+    for(size_t i = 0; i < event_count; i++) {
+        printf(" %s", events[i]);
+    }
+    printf("\r\n");
 }
 
 /* Defined further down, next to the frame parsing; declared here because the IR queue
@@ -377,6 +554,10 @@ static void cfp_dispatch(
         cfp_cmd_ir_status(id, ir);
     } else if(strcmp(cmd, "ir.reset") == 0) {
         cfp_cmd_ir_reset(id, ir);
+    } else if(strcmp(cmd, "nfc.read") == 0) {
+        cfp_cmd_nfc_read(id, arg);
+    } else if(strcmp(cmd, "nfc.watch") == 0) {
+        cfp_cmd_nfc_watch(id, arg);
     } else if(strcmp(cmd, "exit") == 0) {
         cfp_cmd_exit(id, event_queue);
     } else if(cfp_is_board_command(cmd)) {
