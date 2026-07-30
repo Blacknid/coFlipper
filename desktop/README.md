@@ -1,60 +1,61 @@
-# desktop/ — agentul coFlipper
+# desktop/ — the coFlipper agent
 
-Componenta care rulează pe calculator: interpretează cererile utilizatorului cu ajutorul modelului Gemini și le traduce în comenzi CFP trimise către Flipper Zero. Protocolul este documentat în [/PROTOCOL.md](../PROTOCOL.md), catalogul de comenzi în [/commands.json](../commands.json).
+The component that runs on the computer: it interprets user requests with the help of the Gemini model and translates them into CFP commands sent to the Flipper Zero. The protocol is documented in [/PROTOCOL.md](../PROTOCOL.md), the command catalog in [/commands.json](../commands.json).
 
-## Instalare
+## Installation
 
     pip install -r requirements.txt
 
-Apoi copiază `.env.example` în `.env` și completează cheia obținută de la [Google AI Studio](https://aistudio.google.com/apikey):
+Then copy `.env.example` to `.env` and fill in the key obtained from [Google AI Studio](https://aistudio.google.com/apikey):
 
-    GEMINI_API_KEY=cheia_ta
+    GEMINI_API_KEY=your_key
 
-Fișierul `.env` este exclus din git și nu trebuie publicat.
+The `.env` file is excluded from git and must not be published.
 
-### Alegerea modelului
+### Choosing the model
 
-Modelul este fixat explicit în `agent.py` și poate fi schimbat, fără modificarea codului, prin variabila de mediu `COFLIPPER_MODEL`. Am evitat intenționat aliasurile de tip `gemini-flash-latest`: acestea urmăresc mereu cea mai recentă generație, iar limitele de utilizare diferă substanțial de la o generație la alta.
+The model is set explicitly in `agent.py` and can be changed, without modifying the code, through the `COFLIPPER_MODEL` environment variable. We deliberately avoided aliases of the `gemini-flash-latest` kind: these always track the most recent generation, and usage limits differ substantially from one generation to the next.
 
-Constatări practice din timpul dezvoltării, pe planul gratuit:
+Practical findings from during development, on the free plan:
 
-- limita este de aproximativ **20 de cereri pe zi pentru fiecare model** dintre generațiile recente (verificat pe `gemini-3.6-flash` și `gemini-3.5-flash`). Un singur schimb de mesaje poate consuma două sau trei cereri, întrucât fiecare rundă de apeluri de unelte necesită o cerere suplimentară, deci limita se atinge repede;
-- cota se numără separat pentru fiecare model, așa că trecerea la un alt model prin `COFLIPPER_MODEL` oferă o cotă nouă;
-- modelele `gemini-2.0-flash` și `gemini-2.0-flash-lite` nu sunt disponibile pe planul gratuit (răspund cu `limit: 0`), iar `gemini-2.5-flash` și `gemini-2.5-flash-lite` nu mai sunt accesibile cheilor noi (eroare 404). `list_models.py` afișează modelele accesibile cheii configurate.
+- the limit is approximately **20 requests per day for each model** among the recent generations (verified on `gemini-3.6-flash` and `gemini-3.5-flash`). A single exchange of messages can consume two or three requests, since every round of tool calls needs an additional request, so the limit is reached quickly;
+- the quota is counted separately for each model, so switching to another model through `COFLIPPER_MODEL` provides a fresh quota;
+- the `gemini-2.0-flash` and `gemini-2.0-flash-lite` models are not available on the free plan (they respond with `limit: 0`), and `gemini-2.5-flash` and `gemini-2.5-flash-lite` are no longer accessible to new keys (404 error). `list_models.py` shows the models accessible to the configured key.
 
-Consecință pentru dezvoltare: lucrul asupra interfeței se face în modul `--mock` acolo unde este posibil, iar cererile către model se rezervă pentru verificările care au nevoie de ele. Pentru o demonstrație publică merită verificată cota rămasă din timp.
+Consequence for development: work on the interface is done in `--mock` mode wherever possible, and requests to the model are reserved for the checks that actually need them. For a public demonstration it is worth checking the remaining quota ahead of time.
 
-Schimbarea modelului pentru sesiunea curentă, atunci când cota unuia s-a epuizat:
+Changing the model for the current session, when one model's quota has been exhausted:
 
     set COFLIPPER_MODEL=gemini-3.5-flash-lite
     python gui.py
 
-## Rulare
+## Running
 
-Aplicația cu interfață grafică, modul obișnuit de utilizare:
+The graphical application, the usual way to use the project:
 
-    python gui.py             # cu Flipper Zero conectat prin USB
-    python gui.py --mock      # fara dispozitiv fizic, pentru dezvoltare
+    python gui.py             # with a Flipper Zero connected over USB
+    python gui.py --mock      # without a physical device, for development
 
-Aceeași funcționalitate este disponibilă și în consolă, utilă la depanare:
+The same functionality is available in the console as well, useful when debugging:
 
     python agent.py
     python agent.py --mock
 
-În modul `--mock`, comenzile nu ajung la un dispozitiv real: sunt servite de un Flipper simulat care răspunde exact ca firmware-ul (`ping` și `info` reușesc, restul returnează `not_implemented`). Modul este util pentru a lucra pe partea de agent atunci când dispozitivul nu este la îndemână.
+In `--mock` mode, commands do not reach a real device: they are served by a simulated Flipper that responds exactly like the firmware (`ping` and `info` succeed, the rest return `not_implemented`). This mode is useful for working on the agent side when the device is not at hand.
 
-### Semnalarea modului simulat
+### Signalling simulated mode
 
-Modul simulat ridică o problemă de onestitate pe care am descoperit-o abia folosind aplicația: simulatorul întoarce răspunsuri verosimile, iar modelul, neavând cum să știe că vin de la un simulator, informa utilizatorul că dispozitivul este conectat și funcționează normal. Afirmația era falsă, deși niciun element din cod nu era, formal, greșit.
+Simulated mode raises an honesty problem that we only discovered while using the application: the simulator returns plausible responses, and the model, having no way to know they come from a simulator, would inform the user that the device is connected and working normally. The statement was false, even though no element of the code was, formally, wrong.
 
-Soluția are trei componente care se completează reciproc:
+The solution has three components that complement one another:
 
-- fiecare rezultat de unealtă produs în modul simulat conține câmpul `simulated`, pe care modelul îl primește direct;
-- instrucțiunea de sistem primește o secțiune suplimentară care interzice explicit afirmația că un dispozitiv este conectat și cere semnalarea provenienței datelor în fiecare răspuns;
-- interfața folosește galben în loc de verde pentru starea conexiunii, afișează un avertisment la pornire și marchează fiecare rezultat cu „(rezultat simulat)".
+- every tool result produced in simulated mode contains the `simulated` field, which the model receives directly;
+- the system instruction receives an additional section that explicitly forbids stating that a device is connected, and requires signalling the provenance of the data in every response;
+- the interface uses yellow instead of green for the connection status, shows a warning at startup, and marks every result with "(simulated result)".
 
-Fără prima măsură, restricția din instrucțiune ar fi rămas o simplă recomandare, pe care modelul nu avea cum să o aplice: nimic din datele primite nu îi indica faptul că se află într-o simulare.
+Without the first measure, the restriction in the instruction would have remained a mere recommendation, one the model had no way to apply: nothing in the data it received indicated that it was inside a simulation.
 
+<<<<<<< HEAD
 ## Lanțul de raționament
 
 Între cererea utilizatorului și răspunsul final se află o succesiune de decizii: ce unealtă merită apelată, ce a răspuns dispozitivul, ce concluzie se poate trage din acel răspuns, dacă mai este nevoie de o altă măsurătoare. Aplicația păstrează această succesiune și o afișează pas cu pas, în ordinea în care s-a produs. Un tur poate conține mai multe runde de dialog cu modelul, iar fiecare rundă contribuie cu pași la lanț.
@@ -100,11 +101,49 @@ Motivul pentru care lanțul este afișat permanent, și nu ascuns într-un jurna
 Fereastra este împărțită în două panouri: în stânga conversația propriu-zisă, în dreapta lanțul de raționament descris mai sus. Bara de sus arată starea conexiunii (verde pentru conectat, roșu pentru eroare), portul serial folosit și modelul de limbaj activ.
 
 Cât timp agentul lucrează, bara de stare urmărește lanțul: arată dacă modelul raționează în acel moment sau execută o anumită comandă pe dispozitiv, nu doar faptul că este ocupat.
+=======
+## The graphical interface
 
-## Fișiere
+The window is split into two panels. On the left is the conversation proper, on the right the list of commands actually sent to the Flipper Zero, with their arguments and responses.
 
-| Fișier | Rol |
+This second area is not a simple debugging log, but a design decision: an agent that phrases answers in natural language risks appearing to know things it has not measured. By permanently displaying the commands executed on the device, the user can check whether the agent's statements are backed by real data — and, in the case of an error returned by the hardware, sees exactly what failed.
+
+The top bar shows the connection status (green for connected, red for error), the serial port in use and the active language model.
+>>>>>>> 68f3ae9d0fb859fc675335475bc395bf37f8ebcb
+
+## Bringing up the connection
+
+Both the agent and the manual console go through `connect()` in `cfp_client.py`, which handles the two steps a CFP session needs:
+
+1. Finding the serial port, by USB VID/PID rather than by description (on Windows the Flipper shows up as a nondescript "USB Serial Device").
+2. Launching the coFlipper application on the device, if it is not already open.
+
+The second step matters more than it looks: the `cfp` command exists only while our application is running, because it is that application which registers the command into the Flipper's CLI. With it closed, every request fails with `could not find command cfp`. To launch it, the client briefly speaks the Flipper's *native* CLI (`loader info` to see what is open, `loader open` to start our application), then hands the port over to the CFP session proper.
+
+If the application is already open, it is detected and left alone. Use `--no-launch` to skip this step entirely and assume the application is running.
+
+Two device-side details worth knowing: `loader open` needs the full `.fap` path, since it resolves plain names only for built-in applications; and `loader close` does not work on our application, which exits only on a Back event — the `cfp <id> exit` command is what closes it remotely.
+
+### Manual console
+
+    python cfp_client.py                      # interactive, auto-detected port
+    python cfp_client.py --port COM12         # explicit port
+    python cfp_client.py -c "ping" -c "info"  # run commands and exit
+    python cfp_client.py --list-ports         # list serial ports and exit
+    python cfp_client.py --no-launch          # assume the application is already open
+
+It can also be used as a module, which is how `agent.py` obtains its client:
+
+    from cfp_client import connect
+
+    with connect() as flipper:
+        print(flipper.request("ping"))
+
+## Files
+
+| File | Role |
 |---|---|
+<<<<<<< HEAD
 | gui.py | aplicația cu interfață grafică (Tkinter) |
 | agent.py | nucleul agentului: bucla de conversație și orchestrarea apelurilor de unelte |
 | reasoning.py | lanțul de raționament: pașii unui tur, în ordinea în care s-au produs |
@@ -114,18 +153,30 @@ Cât timp agentul lucrează, bara de stare urmărește lanțul: arată dacă mod
 | mock_flipper.py | Flipper simulat, cu aceeași interfață ca clientul real |
 | test_gemini.py | verificare minimală a conexiunii la API-ul Gemini |
 | list_models.py | listează modelele disponibile pentru cheia configurată |
+=======
+| gui.py | the graphical application (Tkinter) |
+| agent.py | the agent proper: the conversation loop and orchestration of tool calls |
+| commands.py | conversion of the commands.json catalog into Gemini tools, and dispatching of calls |
+| device.py | the device connection used by the interface, on a background thread |
+| protocol.py | implementation of the CFP client over the serial port |
+| cfp_client.py | connection setup (port detection + launching the application) and a console for sending CFP commands manually, without a language model |
+| mock_flipper.py | a simulated Flipper, with the same interface as the real client |
+| test_gemini.py | a minimal check of the connection to the Gemini API |
+| list_models.py | lists the models available to the configured key |
+>>>>>>> 68f3ae9d0fb859fc675335475bc395bf37f8ebcb
 
-## Stadiul verificării
+## Verification status
 
-Bucla completă model → unealtă → comandă CFP → răspuns → formulare finală a fost testată cu API-ul Gemini real, atât în modul simulat, cât și pe un Flipper Zero fizic (firmware Momentum `mntm-012`, port serial USB).
+The full loop model → tool → CFP command → response → final phrasing has been tested against the real Gemini API, both in simulated mode and on a physical Flipper Zero (Momentum firmware `mntm-012`, USB serial port).
 
-Scenarii verificate pe dispozitivul fizic:
+Scenarios verified on the physical device:
 
-- interogarea stării dispozitivului (`ping`, `info`), cu apelarea a două unelte într-un singur tur de conversație;
-- măsurarea nivelului de semnal pe o frecvență indicată de utilizator, cu interpretarea valorii în limbaj natural;
-- compararea a două frecvențe, agentul decizând singur să efectueze două măsurători succesive și să formuleze o concluzie;
-- solicitarea unei frecvențe imposibile fizic (2.4 GHz), caz în care agentul a raportat eroarea returnată de dispozitiv și a explicat corect limitarea hardware, fără a inventa o măsurătoare.
+- querying device state (`ping`, `info`), with two tools called within a single conversation turn;
+- measuring the signal level on a frequency indicated by the user, with the value interpreted in natural language;
+- comparing two frequencies, with the agent deciding on its own to perform two successive measurements and formulate a conclusion;
+- requesting a physically impossible frequency (2.4 GHz), in which case the agent reported the error returned by the device and correctly explained the hardware limitation, without inventing a measurement.
 
+<<<<<<< HEAD
 Interfața grafică a fost verificată separat, cu dispozitivul simulat: conectare, activarea corectă a controalelor, trimiterea unei cereri, afișarea comenzilor executate și a răspunsului final, precum și tratarea erorilor fără blocarea ferestrei.
 
 Construirea lanțului de raționament a fost verificată cu modelul înlocuit printr-un set fix de răspunsuri, ceea ce permite verificarea repetată fără a consuma cota zilnică de cereri: ordinea pașilor pe mai multe runde, faptul că fiecare pas ajunge imediat la afișaj, separarea rezumatelor de raționament de textul răspunsului, marcarea rezultatelor simulate, un tur în care comanda eșuează și cazul unui model care nu produce rezumate de raționament.
@@ -133,3 +184,6 @@ Construirea lanțului de raționament a fost verificată cu modelul înlocuit pr
 Faptul că modelul real întoarce efectiv rezumate de raționament atunci când folosește și unelte a fost confirmat separat, cu API-ul Gemini: la cererea de a compara nivelul de semnal de pe două frecvențe, agentul a raționat, a efectuat cele două măsurători și a formulat concluzia, iar lanțul a cuprins toți pașii în ordine. Această verificare nu poate fi înlocuită de cea cu răspunsuri fixe, fiindcă exact aici se afla incertitudinea: dacă modelul acceptă cererea de rezumate simultan cu apelarea uneltelor.
 
 Simulatorul reproduce și `subghz.rssi`, cu aceleași benzi de frecvență pe care le acceptă emițătorul-receptor CC1101 al dispozitivului. Fără această restricție, agentul ar fi fost dezvoltat împotriva unui dispozitiv mai permisiv decât cel real, iar o frecvență respinsă de hardware ar fi trecut neobservată în timpul dezvoltării.
+=======
+The graphical interface was verified separately, with the simulated device: connecting, correct enabling of the controls, sending a request, displaying the executed commands and the final response, as well as handling errors without freezing the window.
+>>>>>>> 68f3ae9d0fb859fc675335475bc395bf37f8ebcb

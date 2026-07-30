@@ -13,15 +13,15 @@
 #define CFP_VERSION "CFP/1"
 #define CFP_CLI_COMMAND "cfp"
 
-/* Formatul protocolului CFP este documentat in /PROTOCOL.md, la radacina proiectului. */
+/* The CFP protocol format is documented in /PROTOCOL.md, at the project root. */
 
-/* Durata totala de esantionare a nivelului de semnal, in pasi de CFP_RSSI_STEP_MS. */
+/* Total sampling duration for the signal level, in steps of CFP_RSSI_STEP_MS. */
 #define CFP_RSSI_SAMPLES 20
 #define CFP_RSSI_STEP_MS 5
 
-/* Masoara nivelul de semnal (RSSI) pe o frecventa data.
-   Radioul e configurat, ascultat scurt si eliberat la fiecare apel: comanda e
-   fara stare, ca sa nu blocheze modulul intre cereri. */
+/* Measures the signal level (RSSI) on a given frequency.
+   The radio is configured, listened to briefly, and released on every call: the command
+   is stateless, so that it does not block the module between requests. */
 static void cfp_cmd_subghz_rssi(uint32_t id, const char* freq_arg) {
     if(!freq_arg) {
         printf(CFP_VERSION " %lu ERR missing_frequency\r\n", id);
@@ -35,8 +35,8 @@ static void cfp_cmd_subghz_rssi(uint32_t id, const char* freq_arg) {
         return;
     }
 
-    /* Radioul intern e deja initializat de firmware la pornire; secventa de mai jos
-       (reset -> preset -> frecventa -> rx) e cea folosita si de aplicatiile stock. */
+    /* The internal radio is already initialized by the firmware at startup; the sequence
+       below (reset -> preset -> frequency -> rx) is the same one the stock apps use. */
     furi_hal_subghz_reset();
     furi_hal_subghz_load_registers(subghz_device_cc1101_preset_ook_650khz_async_regs);
     uint32_t actual = furi_hal_subghz_set_frequency_and_path(frequency);
@@ -52,8 +52,8 @@ static void cfp_cmd_subghz_rssi(uint32_t id, const char* freq_arg) {
     furi_hal_subghz_idle();
     furi_hal_subghz_sleep();
 
-    /* printf-ul din firmware nu formateaza float, deci separam manual
-       partea intreaga de zecimala (RSSI e negativ: -92.3 -> "-92" si "3"). */
+    /* The firmware's printf does not format floats, so we split the integer part from
+       the decimal one manually (RSSI is negative: -92.3 -> "-92" and "3"). */
     int32_t decidbm = (int32_t)(peak * 10.0f);
     int32_t whole = decidbm / 10;
     int32_t fraction = decidbm % 10;
@@ -62,8 +62,8 @@ static void cfp_cmd_subghz_rssi(uint32_t id, const char* freq_arg) {
     printf(CFP_VERSION " %lu OK %lu %ld.%ld\r\n", id, actual, whole, fraction);
 }
 
-/* Inchide aplicatia de la distanta, trimitandu-i acelasi eveniment ca apasarea Back.
-   Fara asta, orice reinstalare cere apasarea fizica a butonului pe dispozitiv. */
+/* Closes the application remotely, by sending it the same event as pressing Back.
+   Without this, any reinstall requires physically pressing the button on the device. */
 static void cfp_cmd_exit(uint32_t id, FuriMessageQueue* event_queue) {
     printf(CFP_VERSION " %lu OK closing\r\n", id);
     InputEvent event = {.key = InputKeyBack, .type = InputTypeShort};
@@ -88,8 +88,8 @@ static void cfp_dispatch(
     }
 }
 
-/* Separa cuvintele urmatoare din buffer, terminandu-le cu '\0'.
-   Returneaza inceputul cuvantului sau NULL cand nu mai urmeaza niciunul. */
+/* Splits off the next word from the buffer, terminating it with '\0'.
+   Returns the start of the word, or NULL when no word follows. */
 static char* cfp_next_token(char** cursor) {
     char* pos = *cursor;
     while(*pos == ' ')
@@ -118,8 +118,8 @@ static void cfp_cli_callback(PipeSide* pipe, FuriString* args, void* context) {
     strncpy(buffer, furi_string_get_cstr(args), sizeof(buffer) - 1);
     buffer[sizeof(buffer) - 1] = '\0';
 
-    /* strtok_r nu e disponibil in API-ul firmware-ului, deci separam manual
-       token-urile; buffer e o copie locala, deci o putem modifica. */
+    /* strtok_r is not available in the firmware API, so we split the tokens
+       manually; buffer is a local copy, so we are free to modify it. */
     char* cursor = buffer;
     char* id_token = cfp_next_token(&cursor);
     char* cmd_token = cfp_next_token(&cursor);
@@ -140,9 +140,9 @@ static void cfp_draw_callback(Canvas* canvas, void* context) {
     canvas_set_font(canvas, FontPrimary);
     canvas_draw_str(canvas, 2, 12, "coFlipper - CFP");
     canvas_set_font(canvas, FontSecondary);
-    canvas_draw_str(canvas, 2, 28, "Server activ pe CLI (USB)");
-    canvas_draw_str(canvas, 2, 40, "comanda: cfp <id> <cmd>");
-    canvas_draw_str(canvas, 2, 60, "Back sau 'cfp N exit' = iesire");
+    canvas_draw_str(canvas, 2, 28, "Server running on CLI (USB)");
+    canvas_draw_str(canvas, 2, 40, "command: cfp <id> <cmd>");
+    canvas_draw_str(canvas, 2, 60, "Back or 'cfp N exit' = quit");
 }
 
 static void cfp_input_callback(InputEvent* event, void* context) {
@@ -163,8 +163,8 @@ int32_t cfp_app_main(void* p) {
     gui_add_view_port(gui, view_port, GuiLayerFullscreen);
 
     CliRegistry* cli = furi_record_open(RECORD_CLI);
-    // ParallelSafe: comanda trebuie sa functioneze cat timp aplicatia noastra
-    // (care o inregistreaza) ruleaza pe ecran, nu doar cand nu-i nicio aplicatie deschisa.
+    // ParallelSafe: the command must work while our application (the one registering it)
+    // is running on screen, not only when no application is open.
     cli_registry_add_command(
         cli, CFP_CLI_COMMAND, CliCommandFlagParallelSafe, cfp_cli_callback, event_queue);
 

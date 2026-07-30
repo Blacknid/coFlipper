@@ -1,12 +1,12 @@
-"""Agentul coFlipper: leaga modelul Gemini de dispozitivul Flipper Zero.
+"""The coFlipper agent: connects the Gemini model to the Flipper Zero device.
 
-Utilizatorul scrie in limbaj natural, modelul decide ce comenzi CFP sunt necesare,
-agentul le executa pe dispozitiv si returneaza modelului rezultatele reale, pe baza
-carora acesta formuleaza raspunsul final.
+The user writes in natural language, the model decides which CFP commands are needed,
+the agent executes them on the device and returns the real results to the model, on
+whose basis it formulates the final answer.
 
-Rulare:
-    python agent.py           # cu Flipper conectat prin USB
-    python agent.py --mock    # fara dispozitiv, pentru dezvoltare
+Running:
+    python agent.py           # with a Flipper connected over USB
+    python agent.py --mock    # without a device, for development
 """
 
 import argparse
@@ -27,8 +27,8 @@ from reasoning import ANSWER, THOUGHT, TOOL, Trace
 # deci schimbarea modelului prin variabila de mediu COFLIPPER_MODEL ofera o cota nouă.
 MODEL = os.environ.get("COFLIPPER_MODEL", "gemini-3.5-flash")
 
-# API-ul returneaza ocazional 503 cand este suprasolicitat. Fara reincercare,
-# o astfel de eroare trecatoare ar intrerupe conversatia in curs.
+# The API occasionally returns 503 when overloaded. Without a retry, such a transient
+# error would interrupt the conversation in progress.
 SEND_RETRIES = 3
 RETRY_DELAY_S = 2.0
 
@@ -146,7 +146,7 @@ def send_with_retry(chat, message):
         except errors.ServerError as exc:
             if attempt == SEND_RETRIES:
                 raise
-            print(f"  [gemini] serviciu indisponibil ({exc.code}), reincerc...")
+            print(f"  [gemini] service unavailable ({exc.code}), retrying...")
             time.sleep(RETRY_DELAY_S * attempt)
         except errors.ClientError as exc:
             # Nu toate modelele accepta cererea de rezumate de raționament. Mesajul brut
@@ -159,17 +159,17 @@ def send_with_retry(chat, message):
                 )
             if exc.code != 429:
                 raise
-            # Un 429 cu 'limit: 0' nu inseamna o cota consumata de noi, ci un model
-            # care nu este deloc disponibil pe planul curent: reincercarea e inutila.
+            # A 429 with 'limit: 0' does not mean a quota we consumed ourselves, but a
+            # model that is not available at all on the current plan: retrying is pointless.
             if "limit: 0" in str(exc):
                 sys.exit(
-                    f"Modelul {MODEL} nu este disponibil pe planul acestei chei API.\n"
-                    "Alege altul prin variabila de mediu COFLIPPER_MODEL "
-                    "(list_models.py arata ce exista)."
+                    f"The model {MODEL} is not available on this API key's plan.\n"
+                    "Choose another one through the COFLIPPER_MODEL environment variable "
+                    "(list_models.py shows what exists)."
                 )
             if attempt == SEND_RETRIES:
                 raise
-            print("  [gemini] limita de cereri atinsa, astept...")
+            print("  [gemini] request limit reached, waiting...")
             time.sleep(RETRY_DELAY_S * attempt * 5)
 
 
@@ -220,29 +220,29 @@ def run_turn(chat, dispatcher, message, on_step=None):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Agentul coFlipper (Gemini + Flipper Zero)")
+    parser = argparse.ArgumentParser(description="The coFlipper agent (Gemini + Flipper Zero)")
     parser.add_argument(
         "--mock",
         action="store_true",
-        help="foloseste un Flipper simulat, fara dispozitiv fizic",
+        help="use a simulated Flipper, without a physical device",
     )
     args = parser.parse_args()
 
     load_dotenv()
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        sys.exit("GEMINI_API_KEY nu este setat. Pune-l in desktop/.env (vezi .env.example).")
+        sys.exit("GEMINI_API_KEY is not set. Put it in desktop/.env (see .env.example).")
 
     catalog = load_catalog()
     commands = device_commands(catalog)
     if not commands:
-        sys.exit("Nicio comanda disponibila in commands.json.")
+        sys.exit("No command available in commands.json.")
 
     if args.mock:
         from mock_flipper import MockCFPClient
 
         flipper = MockCFPClient()
-        print("Mod simulat: niciun dispozitiv fizic nu este folosit.")
+        print("Simulated mode: no physical device is used.")
     else:
         flipper = build_client_for_device()
 
@@ -273,7 +273,7 @@ def main():
             reply, _trace = run_turn(chat, dispatcher, message, log_step)
             print(reply)
     except KeyboardInterrupt:
-        print("\nSesiunea a fost oprita.")
+        print("\nSession stopped.")
     finally:
         flipper.close()
 

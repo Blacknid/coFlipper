@@ -1,40 +1,40 @@
 # coFlipper
 
-Olimpiada de Inovare și Creație Digitală — InfoEducație 2026
-Etapa națională, secțiunea OPEN
+Olympiad of Digital Innovation and Creation — InfoEducație 2026
+National stage, OPEN section
 
 | | |
 |---|---|
-| Lider echipă | Lupu Iulian-Nicolae |
-| Coechipier | Ciuca Andrei-Corneliu |
-| Clasa | a X-a |
-| Instituția | Liceul "Atanasie Marienescu" |
+| Team leader | Lupu Iulian-Nicolae |
+| Teammate | Ciuca Andrei-Corneliu |
+| Grade | 10th |
+| Institution | "Atanasie Marienescu" High School |
 
 ---
 
-## Descriere generală
+## General description
 
-coFlipper este un proiect care își propune dezvoltarea unui harnașament agentic (*agentic harness*) destinat integrării cu dispozitivul Flipper Zero. Pornim de la observația că instrumentele existente pentru Flipper Zero rămân, în esență, utilitare de control manual: utilizatorul selectează o frecvență, inițiază o captură, interpretează singur rezultatul. coFlipper adaugă un nivel suplimentar de mediere între utilizator și dispozitiv — un agent capabil să înțeleagă o intenție exprimată în limbaj natural și să o traducă în operațiuni concrete asupra hardware-ului.
+coFlipper is a project aimed at developing an agentic harness for integration with the Flipper Zero device. We start from the observation that existing tools for the Flipper Zero remain, in essence, manual control utilities: the user selects a frequency, starts a capture, and interprets the result on their own. coFlipper adds an additional layer of mediation between the user and the device — an agent capable of understanding an intent expressed in natural language and translating it into concrete operations on the hardware.
 
-## Motivație
+## Motivation
 
-Interacțiunea curentă cu Flipper Zero presupune, în majoritatea cazurilor, un anumit nivel de cunoștințe tehnice prealabile: utilizatorul trebuie să știe ce frecvență să interogheze, cum se citește un semnal capturat sau ce înseamnă un anumit protocol NFC. Această barieră de intrare limitează accesibilitatea dispozitivului pentru cei care nu provin dintr-un background tehnic solid.
+Current interaction with the Flipper Zero requires, in most cases, a certain level of prior technical knowledge: the user has to know which frequency to probe, how to read a captured signal, or what a particular NFC protocol means. This barrier to entry limits the device's accessibility for those who do not come from a solid technical background.
 
-Ipoteza de la care pornim este că un strat agentic, capabil să proceseze cereri formulate liber și să le transforme în acțiuni asupra Flipper-ului, poate reduce semnificativ această barieră. În loc ca utilizatorul să învețe sintaxa și logica internă a dispozitivului, este suficient să descrie ce anume dorește să afle sau să facă, urmând ca agentul să identifice pașii necesari și să îi execute.
+Our working hypothesis is that an agentic layer, capable of processing freely phrased requests and turning them into actions on the Flipper, can significantly lower that barrier. Instead of the user learning the device's syntax and internal logic, it is enough to describe what they want to find out or do, and the agent identifies the necessary steps and carries them out.
 
-## Obiective
+## Objectives
 
-În cadrul probei OPEN, ne propunem explorarea și implementarea următoarelor direcții funcționale:
+Within the OPEN section, we set out to explore and implement the following functional directions:
 
-- Analiza frecvențelor radio — capacitatea agentului de a interoga o frecvență specifică și de a returna informații contextuale relevante despre aceasta (de exemplu, la ce tip de dispozitiv sau protocol pare să fie asociată, pe baza semnalului capturat).
-- Interacțiune cu infraroșu — utilizarea modulului IR al Flipper Zero pentru identificarea și, eventual, replicarea semnalelor emise de telecomenzi sau alte dispozitive compatibile.
-- Interacțiune cu NFC — un scenariu ilustrativ pentru această direcție ar fi acela în care utilizatorul indică agentului un dispozitiv mobil anume, iar agentul construiește, pe baza acestei cereri, o rutină care permite observarea entităților sau punctelor de acces cu care modulul NFC al telefonului respectiv intră în contact.
+- Radio frequency analysis — the agent's ability to probe a specific frequency and return relevant contextual information about it (for example, what type of device or protocol it appears to be associated with, based on the captured signal).
+- Infrared interaction — using the Flipper Zero's IR module to identify and, potentially, replicate signals emitted by remote controls or other compatible devices.
+- NFC interaction — an illustrative scenario for this direction would be one where the user points the agent at a particular mobile phone, and the agent builds, based on that request, a routine that allows observing the entities or access points that the phone's NFC module comes into contact with.
 
-Aceste trei direcții nu sunt exhaustive, ci reprezintă un punct de plecare pentru validarea conceptului în intervalul de timp disponibil pentru probă. Pe măsură ce implementarea avansează, alte capabilități ale Flipper Zero (precum sub-GHz, RFID de joasă frecvență sau modulul GPIO) pot fi integrate în mod similar.
+These three directions are not exhaustive; they are a starting point for validating the concept within the time available for the contest. As the implementation advances, other Flipper Zero capabilities (such as Sub-GHz, low-frequency RFID, or the GPIO module) can be integrated in the same way.
 
-## Arhitectură propusă
+## Proposed architecture
 
-Proiectul este organizat pe două componente principale, reflectate și în structura repository-ului:
+The project is organized around two main components, mirrored in the repository structure:
 
 - flipper/ — logica destinată să ruleze pe (sau în relație directă cu) dispozitivul Flipper Zero: comunicarea cu modulele sale radio, IR și NFC, precum și expunerea acestor capabilități către restul sistemului.
 - desktop/ — componenta agentică propriu-zisă, responsabilă de interpretarea cererilor utilizatorului, decizia asupra pașilor necesari și orchestrarea comenzilor trimise către Flipper Zero. Include aplicația cu interfață grafică prin care utilizatorul interacționează efectiv cu sistemul.
@@ -43,32 +43,36 @@ Separarea celor două componente urmărește un principiu simplu: dispozitivul r
 
 Comunicarea dintre cele două componente se face prin portul serial USB al Flipper Zero, folosind un protocol text propriu, denumit CFP (coFlipper Protocol) și documentat integral în PROTOCOL.md.
 
-Legătura dintre modelul de limbaj și dispozitiv este realizată printr-un catalog declarativ de comenzi, commands.json. Acesta reprezintă singura sursă de adevăr a sistemului: fiecare comandă descrisă acolo este convertită automat, la pornirea agentului, într-o unealtă apelabilă de model (*function calling*). Adăugarea unei funcționalități noi presupune, prin urmare, descrierea ei în catalog și implementarea ei în firmware, fără modificări în logica agentului.
+The link between the language model and the device is realized through a declarative command catalog, commands.json. This is the system's single source of truth: every command described there is automatically converted, when the agent starts, into a tool the model can call (*function calling*). Adding a new capability therefore means describing it in the catalog and implementing it in firmware, with no changes to the agent's logic.
 
 Fluxul complet al unei cereri este următorul: utilizatorul formulează o intenție în limbaj natural; modelul decide care comenzi din catalog sunt necesare și le solicită; agentul le traduce în cadre CFP și le trimite pe portul serial; Flipper Zero le execută și răspunde; rezultatele reale sunt returnate modelului, care formulează pe baza lor răspunsul final.
 
 Interacțiunea are loc într-o aplicație cu interfață grafică, organizată în două panouri: conversația și, permanent vizibil alături de ea, lanțul de raționament al agentului — raționamentele modelului și comenzile executate efectiv pe dispozitiv, în ordinea în care s-au produs. Această a doua zonă are o funcție care depășește depanarea: permite utilizatorului să verifice că afirmațiile agentului se sprijină pe măsurători reale, nu pe formulări plauzibile.
 
-O constrângere de proiectare pe care am considerat-o esențială este aceea că modelul nu are permisiunea de a formula afirmații despre starea hardware-ului în absența unui rezultat efectiv primit de la dispozitiv. Dacă o comandă eșuează sau nu este încă implementată, agentul comunică explicit acest lucru, în loc să producă un răspuns plauzibil, dar fabricat. Fără această restricție, un asistent conversațional aplicat unui domeniu tehnic ar putea genera date aparent credibile — frecvențe, identificatori de carduri, protocoale — care nu corespund niciunei măsurători reale.
+One design constraint we considered essential is that the model is not permitted to make claims about the state of the hardware in the absence of an actual result received from the device. If a command fails or is not yet implemented, the agent states this explicitly instead of producing a plausible but fabricated answer. Without this restriction, a conversational assistant applied to a technical domain could generate seemingly credible data — frequencies, card identifiers, protocols — that corresponds to no real measurement.
 
-## Filosofia de proiectare
+## Design philosophy
 
-Un aspect central al acestui proiect este delegarea deciziilor de „cum” către agent, păstrând la nivelul utilizatorului doar formularea intenției — „ce” anume își dorește. Această separare este inspirată din paradigma agenților capabili să opereze instrumente externe (*tool use*), în care limbajul natural devine interfața primară, iar traducerea în comenzi tehnice concrete este responsabilitatea stratului intermediar.
+A central aspect of this project is delegating the "how" decisions to the agent, leaving the user only with phrasing the intent — the "what" they want. This separation is inspired by the paradigm of agents able to operate external instruments (*tool use*), in which natural language becomes the primary interface and the translation into concrete technical commands is the intermediate layer's responsibility.
 
-## Elemente de originalitate
+## Elements of originality
 
-Spre deosebire de aplicațiile companion existente pentru Flipper Zero, care expun funcționalitățile dispozitivului printr-o interfață grafică tradițională, coFlipper propune o interfață conversațională ca punct central de interacțiune. Utilizatorul nu navighează manual printr-un meniu de opțiuni, ci descrie rezultatul dorit, iar agentul este cel care alege și înlănțuie operațiile necesare pe dispozitiv.
+Unlike existing companion applications for the Flipper Zero, which expose the device's functionality through a traditional graphical interface, coFlipper proposes a conversational interface as the central point of interaction. The user does not navigate manually through a menu of options, but describes the desired outcome, and it is the agent that chooses and chains the operations needed on the device.
 
-Este important de precizat unde se află, concret, originalitatea acestui proiect și unde nu se află. Comenzile individuale expuse de Flipper Zero prin protocolul CFP — citirea unui semnal Sub-GHz, decodarea unui semnal infraroșu, citirea sau emularea unui tag NFC — nu sunt originale: ele reproduc funcționalități pe care dispozitivul le are deja, nativ, în aplicațiile sale din fabrică. Catalogul complet al acestor comenzi este documentat în commands.json, sub eticheta `"layer": "device"`.
+It is important to state precisely where this project's originality lies and where it does not. The individual commands the Flipper Zero exposes through the CFP protocol — reading a Sub-GHz signal, decoding an infrared signal, reading or emulating an NFC tag — are not original: they reproduce functionality the device already has natively, in its factory applications. The full catalog of these commands is documented in commands.json, under the `"layer": "device"` label.
 
-Originalitatea proiectului se află într-un nivel superior acestora, marcat în același fișier sub eticheta `"layer": "agent"`: operațiile care combină una sau mai multe comenzi de nivel device cu un raționament realizat de modelul de limbaj, pentru a produce un răspuns interpretat, nu doar date brute. De exemplu, în loc să afișeze un cod de protocol Sub-GHz, agentul poate explica, în limbaj natural, ce tip de dispozitiv este probabil sursa semnalului; în loc să listeze UID-uri NFC, poate construi un rezumat al unei sesiuni de monitorizare. Acesta este stratul care nu are, după cunoștințele noastre, un echivalent direct în ecosistemul de aplicații existente pentru Flipper Zero.
+The project's originality lies at a layer above these, marked in the same file under the `"layer": "agent"` label: operations that combine one or more device-level commands with reasoning performed by the language model, in order to produce an interpreted answer rather than just raw data. For example, instead of displaying a Sub-GHz protocol code, the agent can explain, in natural language, what type of device is likely the source of the signal; instead of listing NFC UIDs, it can build a summary of a monitoring session. This is the layer that, to the best of our knowledge, has no direct equivalent in the existing ecosystem of applications for the Flipper Zero.
 
+<<<<<<< HEAD
 O a doua contribuție, complementară celei de mai sus, este lanțul de raționament expus permanent utilizatorului. Aplicațiile conversaționale obișnuite arată doar întrebarea și răspunsul, iar drumul dintre ele rămâne ascuns; în cazul unui agent care acționează asupra hardware-ului, acest drum este tocmai partea care poate fi verificată. coFlipper afișează, pas cu pas și în timp real, raționamentele modelului alături de comenzile pe care acestea le-au motivat, cu argumentele și răspunsurile primite de la dispozitiv. Utilizatorul poate astfel urmări nu numai ce a răspuns agentul, ci și de ce a ales să facă tocmai acele măsurători — iar când o comandă eșuează, se vede exact ce a eșuat și în ce moment al raționamentului. Detaliile de implementare sunt documentate în desktop/README.md.
 
 ## Stadiul curent și limitări
+=======
+## Current status and limitations
+>>>>>>> 68f3ae9d0fb859fc675335475bc395bf37f8ebcb
 
-Proiectul a fost dezvoltat în cadrul probei OPEN a etapei naționale InfoEducație 2026, în intervalul de timp alocat acesteia. Ca urmare, implementarea reflectă un stadiu incipient, de prototip funcțional, concentrat pe validarea conceptului mai degrabă decât pe acoperirea exhaustivă a tuturor capabilităților Flipper Zero. Extinderea și consolidarea proiectului rămân direcții firești pentru o eventuală continuare ulterioară competiției.
+The project was developed within the OPEN section of the InfoEducație 2026 national stage, in the time allotted to it. As a result, the implementation reflects an early stage — a working prototype — focused on validating the concept rather than exhaustively covering all Flipper Zero capabilities. Extending and consolidating the project remain natural directions for a possible continuation after the competition.
 
-## Declarație de originalitate
+## Statement of originality
 
-În conformitate cu regulamentul InfoEducație, componentele proiectului care nu aparțin în întregime autorilor (biblioteci externe, fragmente de cod preluate, resurse grafice etc.) sunt menționate explicit în fișierul separat de originalitate atașat lucrării.
+In accordance with the InfoEducație regulations, the project components that do not belong entirely to the authors (external libraries, borrowed code fragments, graphical resources, etc.) are explicitly listed in the separate originality file attached to the submission.

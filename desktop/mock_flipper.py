@@ -1,5 +1,6 @@
-"""Flipper simulat, cu aceeasi interfata ca CFPClient.
+"""A simulated Flipper, with the same interface as CFPClient.
 
+<<<<<<< HEAD
 Serveste la dezvoltarea si testarea agentului fara dispozitivul fizic conectat.
 Raspunde ca firmware-ul real: reusesc doar comenzile pe care acesta le implementeaza
 (ping, info, subghz.rssi), iar orice altceva primeste ERR unknown_command.
@@ -7,13 +8,18 @@ Raspunde ca firmware-ul real: reusesc doar comenzile pe care acesta le implement
 Valorile intoarse de subghz.rssi sunt fictive. Ele nu pot fi confundate cu masuratori
 reale: clientul e marcat 'simulated', iar marcajul insoteste fiecare rezultat trimis
 modelului (vezi CommandDispatcher._result).
+=======
+Used for developing and testing the agent without the physical device connected.
+Responds exactly like the real firmware: only 'ping' and 'info' succeed, the rest
+of the firmware commands respond ERR not_implemented.
+>>>>>>> 68f3ae9d0fb859fc675335475bc395bf37f8ebcb
 """
 
 from protocol import CFPError
 
 IMPLEMENTED = {
     "ping": ["pong"],
-    "info": ["Flipper", "Zero", "(simulat)"],
+    "info": ["Flipper", "Zero", "(simulated)"],
 }
 
 # Benzile in care emitatorul-receptor CC1101 al dispozitivului poate lucra. Firmware-ul
