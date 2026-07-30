@@ -67,8 +67,19 @@ class Step:
         if self.kind != TOOL:
             return ""
         if self.ok:
+<<<<<<< HEAD
             return f"OK {' '.join(self.outcome.get('data') or [])}".strip()
         return f"ERR {self.outcome.get('error', 'unknown error')}"
+=======
+            # Comenzile de dispozitiv intorc 'data'; cele de agent (ex. bruteforce-ul IR)
+            # intorc un rezumat propriu, deci afisam ce exista.
+            if "data" in self.outcome:
+                summary = " ".join(self.outcome.get("data") or [])
+            else:
+                summary = self.outcome.get("message") or self.outcome.get("outcome") or "gata"
+            return f"OK {summary}".strip()
+        return f"ERR {self.outcome.get('error', 'eroare necunoscuta')}"
+>>>>>>> 655a80a85f43f7e3f520c36f472286eba905fc2d
 
 
 class Trace:

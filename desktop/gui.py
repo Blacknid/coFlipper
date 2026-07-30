@@ -501,6 +501,7 @@ class CoFlipperWindow:
         elif step.kind == ANSWER:
             self._append(self.chain, f"răspuns formulat ({step.at_s:.1f} s)\n", "label")
 
+<<<<<<< HEAD
     def _on_spawn(self, step):
         """Announces the summoning of a subagent: who it is, what it can do, what was asked.
 
@@ -536,6 +537,21 @@ class CoFlipperWindow:
         self._set_status("agentul principal preia raportul...", ORANGE)
 
     # ----------------------------------------------------------- worker threads
+=======
+    def _on_event_ir_progress(self, payload):
+        sent, total = payload
+        self._set_status(f"bruteforce IR: {sent}/{total} coduri trimise", WARN_YELLOW)
+
+    # ------------------------------------------------------------- fire de lucru
+>>>>>>> 655a80a85f43f7e3f520c36f472286eba905fc2d
+
+    def _on_ir_progress(self, sent, total):
+        """Apelat din firul de lucru, in timpul unui bruteforce IR.
+
+        Nu atinge direct widget-urile: Tkinter nu suporta apeluri din alt fir, deci
+        progresul trece prin aceeasi coada de evenimente ca restul mesajelor.
+        """
+        self._emit("ir_progress", (sent, total))
 
     def _connect(self):
         load_dotenv()
@@ -570,11 +586,20 @@ class CoFlipperWindow:
                 self.flipper = LiveDevice()
                 status = "se caută dispozitivul..."
 
+<<<<<<< HEAD
             self.dispatcher = CommandDispatcher(commands, self.flipper)
             self.dispatcher.subagents = SubagentRunner(
                 api_key, self.dispatcher, self.dispatcher.simulated
             )
             # The client is kept as an attribute, not a local variable: see build_chat.
+=======
+            # Bruteforce-ul IR dureaza secunde bune; fara acest apel fereastra ar parea
+            # blocata cat timp Flipper-ul emite codurile.
+            self.dispatcher = CommandDispatcher(
+                commands, self.flipper, on_progress=self._on_ir_progress
+            )
+            # Clientul se pastreaza ca atribut, nu ca variabila locala: vezi build_chat.
+>>>>>>> 655a80a85f43f7e3f520c36f472286eba905fc2d
             self.genai_client, self.chat = build_chat(
                 api_key, commands, self.dispatcher.simulated
             )

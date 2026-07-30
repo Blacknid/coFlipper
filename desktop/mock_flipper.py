@@ -1,5 +1,6 @@
 """A simulated Flipper, with the same interface as CFPClient.
 
+<<<<<<< HEAD
 Used for developing and testing the agent without the physical device connected.
 Responds like the real firmware: only the commands the firmware implements succeed
 (ping, info, subghz.rssi), and anything else gets ERR unknown_command.
@@ -12,6 +13,20 @@ Its data is just as fictitious as subghz.rssi's, and carries the same 'simulated
 The values returned by subghz.rssi are fictitious. They cannot be mistaken for real
 measurements: the client is marked 'simulated', and that marking accompanies every
 result sent to the model (see CommandDispatcher._result).
+=======
+Serveste la dezvoltarea si testarea agentului fara dispozitivul fizic conectat.
+Raspunde ca firmware-ul real: reusesc doar comenzile pe care acesta le implementeaza
+(ping, info, subghz.rssi si comenzile ir.*), comenzile marcate ca stub raspund ERR
+not_implemented, iar orice altceva primeste ERR unknown_command.
+
+Valorile intoarse de subghz.rssi sunt fictive. Ele nu pot fi confundate cu masuratori
+reale: clientul e marcat 'simulated', iar marcajul insoteste fiecare rezultat trimis
+modelului (vezi CommandDispatcher._result).
+
+Comenzile de bruteforce IR sunt simulate cu stare reala (o coada, un contor), fiindca
+partea de desktop le interogheaza in bucla: un stub care ar raspunde mereu la fel ar
+lasa acea bucla sa se roteasca pana la expirarea timpului.
+>>>>>>> 655a80a85f43f7e3f520c36f472286eba905fc2d
 """
 
 import random
@@ -23,9 +38,23 @@ IMPLEMENTED = {
     "info": ["Flipper", "Zero", "(simulated)"],
 }
 
+<<<<<<< HEAD
 # The bands the device's CC1101 transceiver is able to work in. The firmware rejects any
 # frequency outside them, so the simulator has to do the same: otherwise the agent would
 # be developed against a device more permissive than the real one.
+=======
+# Comenzi pe care firmware-ul le recunoaste, dar nu le-a implementat inca: raspund
+# not_implemented, nu unknown_command, ca agentul sa vada aceeasi diferenta ca pe
+# dispozitivul real.
+STUBS = ("subghz.info", "ir.info", "nfc.info")
+
+# Comenzile de bruteforce IR servite cu stare simulata de _ir_request.
+IR_COMMANDS = ("ir.reset", "ir.queue", "ir.bruteforce", "ir.status")
+
+# Benzile in care emitatorul-receptor CC1101 al dispozitivului poate lucra. Firmware-ul
+# respinge orice frecventa din afara lor, deci simulatorul trebuie sa faca la fel:
+# altfel agentul ar fi dezvoltat pe un dispozitiv mai permisiv decat cel real.
+>>>>>>> 655a80a85f43f7e3f520c36f472286eba905fc2d
 SUBGHZ_BANDS = (
     (300_000_000, 348_000_000),
     (387_000_000, 464_000_000),
@@ -401,12 +430,23 @@ class MockCFPClient:
     # so that it cannot present simulated data as real measurements.
     simulated = True
 
-    def __init__(self):
+    def __init__(self, stop_after=None):
         self.calls = []
+<<<<<<< HEAD
         # How many readings have been taken per frequency, which selects the jitter.
         self._readings = {}
         # Serves every wifi.*/ble.* command, holding the same state the real board would.
         self._marauder = MarauderSim()
+=======
+        # IR bruteforce state, mirroring CfpIrState in the firmware.
+        self._ir_queue = []
+        self._ir_sent = 0
+        self._ir_running = False
+        self._ir_stopped = False
+        # Which code the simulated user "reacts" to by pressing OK. None means no code
+        # works and the run goes to exhaustion.
+        self._stop_after = stop_after
+>>>>>>> 655a80a85f43f7e3f520c36f472286eba905fc2d
 
     def close(self):
         pass
@@ -417,17 +457,68 @@ class MockCFPClient:
     def __exit__(self, *exc_info):
         self.close()
 
+    def _ir_request(self, cmd, args):
+        if cmd == "ir.reset":
+            self._ir_queue = []
+            self._ir_sent = 0
+            self._ir_running = False
+            self._ir_stopped = False
+            return ["cleared"]
+
+        if cmd == "ir.queue":
+            if len(args) < 3:
+                raise CFPError("missing_code")
+            self._ir_queue.append(tuple(args[:3]))
+            return [str(len(self._ir_queue))]
+
+        if cmd == "ir.bruteforce":
+            if not self._ir_queue:
+                raise CFPError("empty_queue")
+            self._ir_running = True
+            self._ir_stopped = False
+            self._ir_sent = 0
+            return ["started", str(len(self._ir_queue))]
+
+        if cmd == "ir.status":
+            # Each poll advances the run by one code, the way the device does between
+            # two transmissions.
+            if self._ir_running:
+                if self._stop_after is not None and self._ir_sent >= self._stop_after:
+                    self._ir_running = False
+                    self._ir_stopped = True
+                elif self._ir_sent < len(self._ir_queue):
+                    self._ir_sent += 1
+                else:
+                    self._ir_running = False
+
+            if self._ir_running:
+                state = "running"
+            elif self._ir_stopped:
+                state = "stopped"
+            else:
+                state = "idle"
+            return [state, str(self._ir_sent), str(len(self._ir_queue))]
+
+        return None
+
     def request(self, cmd, *args):
         self.calls.append((cmd, args))
         if cmd in IMPLEMENTED:
             return IMPLEMENTED[cmd]
+        if cmd in IR_COMMANDS:
+            return self._ir_request(cmd, args)
         if cmd == "subghz.rssi":
             return self._subghz_rssi(args)
+<<<<<<< HEAD
         # The Wi-Fi dev board is served by its own simulator. On real hardware these travel
         # on to the ESP32 over UART; here they are answered locally, with the same state a
         # real board would carry across commands.
         if cmd.startswith(("wifi.", "ble.")) or cmd == "marauder.reboot":
             return self._marauder.handle(cmd, args)
+=======
+        if cmd in STUBS:
+            raise CFPError("not_implemented")
+>>>>>>> 655a80a85f43f7e3f520c36f472286eba905fc2d
         raise CFPError("unknown_command")
 
     def _subghz_rssi(self, args):

@@ -36,7 +36,12 @@
       "category": "core",
       "description": "Lists the files saved on the SD card in a given folder (saved IR/Sub-GHz signals, saved NFC cards, etc.).",
       "args": [
-        { "name": "path", "type": "string", "required": true, "description": "path on the SD card, e.g. /ext/subghz" }
+        {
+          "name": "path",
+          "type": "string",
+          "required": true,
+          "description": "path on the SD card, e.g. /ext/subghz"
+        }
       ],
       "returns": "a list of file names",
       "status": "planned"
@@ -57,7 +62,12 @@
       "category": "subghz",
       "description": "Measures the signal level (RSSI, in dBm) on a given frequency, listening for approximately 100 ms. Values close to -50 dBm indicate a strong signal, those below -90 dBm generally indicate only background noise. It does not decode the signal, only quantifies its presence.",
       "args": [
-        { "name": "frequency", "type": "integer", "required": true, "description": "frequency in Hz, e.g. 433920000" }
+        {
+          "name": "frequency",
+          "type": "integer",
+          "required": true,
+          "description": "frequency in Hz, e.g. 433920000"
+        }
       ],
       "returns": "the frequency actually synthesized by the radio (Hz) and the peak RSSI value (dBm)",
       "status": "implemented"
@@ -68,7 +78,12 @@
       "category": "subghz",
       "description": "Scans a list of known frequencies and reports on which of them activity is detected (RSSI above a threshold).",
       "args": [
-        { "name": "duration_ms", "type": "integer", "required": false, "description": "scan duration, 3000 by default" }
+        {
+          "name": "duration_ms",
+          "type": "integer",
+          "required": false,
+          "description": "scan duration, 3000 by default"
+        }
       ],
       "returns": "a list of frequencies with a detected signal",
       "status": "planned"
@@ -79,8 +94,18 @@
       "category": "subghz",
       "description": "Listens on a specific frequency and tries to identify the protocol of the captured signal (e.g. a gate remote, a weather station).",
       "args": [
-        { "name": "frequency", "type": "integer", "required": true, "description": "frequency in Hz, e.g. 433920000" },
-        { "name": "timeout_ms", "type": "integer", "required": false, "description": "how long it waits for a signal, 5000 by default" }
+        {
+          "name": "frequency",
+          "type": "integer",
+          "required": true,
+          "description": "frequency in Hz, e.g. 433920000"
+        },
+        {
+          "name": "timeout_ms",
+          "type": "integer",
+          "required": false,
+          "description": "how long it waits for a signal, 5000 by default"
+        }
       ],
       "returns": "the detected protocol (if known), the raw captured data",
       "status": "planned"
@@ -91,7 +116,12 @@
       "category": "subghz",
       "description": "Retransmits a Sub-GHz signal previously saved on the SD card. Intended for testing one's own devices (e.g. one's own gate remote), not for someone else's signals.",
       "args": [
-        { "name": "file", "type": "string", "required": true, "description": "path to the saved .sub file" }
+        {
+          "name": "file",
+          "type": "string",
+          "required": true,
+          "description": "path to the saved .sub file"
+        }
       ],
       "returns": "transmission confirmation",
       "status": "planned"
@@ -102,7 +132,12 @@
       "category": "infrared",
       "description": "Waits for and decodes the next IR signal received (e.g. a button press on a remote pointed at the Flipper).",
       "args": [
-        { "name": "timeout_ms", "type": "integer", "required": false, "description": "how long it waits for a signal, 5000 by default" }
+        {
+          "name": "timeout_ms",
+          "type": "integer",
+          "required": false,
+          "description": "how long it waits for a signal, 5000 by default"
+        }
       ],
       "returns": "the decoded protocol, address, and command",
       "status": "planned"
@@ -113,7 +148,12 @@
       "category": "infrared",
       "description": "Learns a new IR signal (from a physical remote) and saves it under a given name, for later reuse.",
       "args": [
-        { "name": "name", "type": "string", "required": true, "description": "the name to save the signal under, e.g. tv_power" }
+        {
+          "name": "name",
+          "type": "string",
+          "required": true,
+          "description": "the name to save the signal under, e.g. tv_power"
+        }
       ],
       "returns": "save confirmation",
       "status": "planned"
@@ -124,10 +164,81 @@
       "category": "infrared",
       "description": "Retransmits a previously saved IR signal (universal remote functionality).",
       "args": [
-        { "name": "name", "type": "string", "required": true, "description": "the name of the saved signal, e.g. tv_power" }
+        {
+          "name": "name",
+          "type": "string",
+          "required": true,
+          "description": "the name of the saved signal, e.g. tv_power"
+        }
       ],
       "returns": "transmission confirmation",
       "status": "planned"
+    },
+    {
+      "name": "ir.queue",
+      "layer": "device",
+      "category": "infrared",
+      "description": "Adds one IR code to the list pending transmission. Queueing is separate from transmitting because a CFP v1 frame cannot carry a whole code list: one frame queues one code.",
+      "args": [
+        {
+          "name": "protocol",
+          "type": "string",
+          "required": true,
+          "description": "IR protocol name, e.g. NEC, Samsung32, SIRC, RC5"
+        },
+        {
+          "name": "address",
+          "type": "string",
+          "required": true,
+          "description": "device address, hexadecimal, e.g. 0x07"
+        },
+        {
+          "name": "command",
+          "type": "string",
+          "required": true,
+          "description": "command byte, hexadecimal, e.g. 0x02"
+        }
+      ],
+      "returns": "how many codes are queued",
+      "status": "implemented",
+      "agent_visible": false
+    },
+    {
+      "name": "ir.bruteforce",
+      "layer": "device",
+      "category": "infrared",
+      "description": "Starts transmitting the queued IR codes, one every 250 ms, showing a progress bar on the Flipper's screen. Returns as soon as the run has started, not when it finishes: the run lasts several seconds, far longer than the client's read timeout. The user stops it by pressing the middle (OK) button on the device when the appliance reacts.",
+      "args": [
+        {
+          "name": "label",
+          "type": "string",
+          "required": false,
+          "description": "what is being bruteforced, shown on the device screen; no spaces"
+        }
+      ],
+      "returns": "start confirmation and the number of queued codes",
+      "status": "implemented",
+      "agent_visible": false
+    },
+    {
+      "name": "ir.status",
+      "layer": "device",
+      "category": "infrared",
+      "description": "How far the bruteforce has got: state (running/stopped/idle), how many codes have been sent, and how many were queued. 'stopped' means the user pressed OK on the device, i.e. the appliance responded to the code just sent.",
+      "args": [],
+      "returns": "state, codes sent, codes queued",
+      "status": "implemented",
+      "agent_visible": false
+    },
+    {
+      "name": "ir.reset",
+      "layer": "device",
+      "category": "infrared",
+      "description": "Clears the queued IR codes, so the next run starts from a clean slate.",
+      "args": [],
+      "returns": "clear confirmation",
+      "status": "implemented",
+      "agent_visible": false
     },
     {
       "name": "nfc.read",
@@ -135,7 +246,12 @@
       "category": "nfc",
       "description": "Waits for an NFC tag/card brought close to the Flipper and returns its UID and type.",
       "args": [
-        { "name": "timeout_ms", "type": "integer", "required": false, "description": "how long it waits for a card, 5000 by default" }
+        {
+          "name": "timeout_ms",
+          "type": "integer",
+          "required": false,
+          "description": "how long it waits for a card, 5000 by default"
+        }
       ],
       "returns": "UID, card type (Mifare, NTAG, etc.)",
       "status": "planned"
@@ -146,7 +262,12 @@
       "category": "nfc",
       "description": "Monitors, over a period of time, all NFC tags/cards that come within range of the module.",
       "args": [
-        { "name": "duration_ms", "type": "integer", "required": true, "description": "monitoring duration in milliseconds" }
+        {
+          "name": "duration_ms",
+          "type": "integer",
+          "required": true,
+          "description": "monitoring duration in milliseconds"
+        }
       ],
       "returns": "a list of detected card UIDs/types, in chronological order, with timestamps",
       "status": "planned"
@@ -157,7 +278,12 @@
       "category": "nfc",
       "description": "Emulates a previously saved NFC card (the Flipper behaves like that card towards a reader).",
       "args": [
-        { "name": "name", "type": "string", "required": true, "description": "the name of the saved card" }
+        {
+          "name": "name",
+          "type": "string",
+          "required": true,
+          "description": "the name of the saved card"
+        }
       ],
       "returns": "emulation start confirmation",
       "status": "planned"
@@ -168,7 +294,12 @@
       "category": "rfid",
       "description": "Reads a low-frequency RFID card (125 kHz) brought close to the Flipper.",
       "args": [
-        { "name": "timeout_ms", "type": "integer", "required": false, "description": "how long it waits for a card, 5000 by default" }
+        {
+          "name": "timeout_ms",
+          "type": "integer",
+          "required": false,
+          "description": "how long it waits for a card, 5000 by default"
+        }
       ],
       "returns": "card ID, protocol (EM4100, HID, etc.)",
       "status": "planned"
@@ -739,9 +870,16 @@
       "layer": "agent",
       "category": "agent",
       "description": "Translates the raw result of a Sub-GHz capture into natural language: what type of device is likely the source of the signal (gate/car remote, sensor, weather station, etc.), based on the frequency, the detected protocol, and a purpose-built database of frequency-protocol-device correspondences, rather than just displaying the raw code as the stock Flipper application does.",
-      "uses": ["subghz.read"],
+      "uses": [
+        "subghz.read"
+      ],
       "args": [
-        { "name": "frequency", "type": "integer", "required": true, "description": "the frequency to probe, in Hz" }
+        {
+          "name": "frequency",
+          "type": "integer",
+          "required": true,
+          "description": "the frequency to probe, in Hz"
+        }
       ],
       "returns": "a natural-language explanation + the confidence level of the identification",
       "status": "planned"
@@ -751,9 +889,16 @@
       "layer": "agent",
       "category": "agent",
       "description": "Runs nfc.watch for the specified duration and builds a natural-language summary of the session: how many distinct cards/tags were seen, which one repeated, and a guess about the usage context (e.g. 'it looks like the phone interacted 3 times with the same reader, possibly a transit pass'). This answers exactly the project's initial idea: to show what a phone's NFC connected with.",
-      "uses": ["nfc.watch"],
+      "uses": [
+        "nfc.watch"
+      ],
       "args": [
-        { "name": "duration_ms", "type": "integer", "required": true, "description": "the duration of the monitoring session" }
+        {
+          "name": "duration_ms",
+          "type": "integer",
+          "required": true,
+          "description": "the duration of the monitoring session"
+        }
       ],
       "returns": "a text summary + a structured list of the events",
       "status": "planned"
@@ -763,10 +908,58 @@
       "layer": "agent",
       "category": "agent",
       "description": "Captures an unknown IR signal and tries to deduce what type of appliance/brand emitted it, based on the timing fingerprint of the protocol (NEC, RC5, Samsung, etc.), also offering an explanation of the reasoning, not just the protocol label.",
-      "uses": ["ir.read"],
+      "uses": [
+        "ir.read"
+      ],
       "args": [],
       "returns": "a guess about the type/brand of the appliance + the decoded protocol",
       "status": "planned"
+    },
+    {
+      "name": "agent.ir_control",
+      "layer": "agent",
+      "category": "agent",
+      "description": "Controls an IR appliance (TV, projector, audio system, air conditioner) from a request in natural language: 'turn off my tv', 'turn off this projector', 'volume up', 'next channel', 'mute the soundbar'. Works out from the request what kind of appliance it is and which function is wanted, selects only the codes that have a real chance of working, and transmits them one by one until the user presses the middle (OK) button on the Flipper to signal that the appliance reacted. Filtering by brand is the point: a Samsung TV is only ever sent Samsung codes, never other brands'. If the brand given is not in the database, the closest known name is used and the substitution is reported. If no brand is given, every brand of that appliance type is tried, which is when it behaves like a classic bruteforce. The Flipper's screen shows 'Bruteforcing IR' with a progress bar for the duration of the run. Codes come from a small built-in table first; after five unsuccessful attempts on the same appliance and button it searches an online database of thousands of real remotes automatically. Set search_online to do that immediately, which is what to do when the user says it did not work.",
+      "uses": [
+        "ir.queue",
+        "ir.bruteforce",
+        "ir.status",
+        "ir.reset"
+      ],
+      "args": [
+        {
+          "name": "request",
+          "type": "string",
+          "required": true,
+          "description": "the user's request, in their own words, e.g. 'turn off my samsung tv'"
+        },
+        {
+          "name": "brand",
+          "type": "string",
+          "required": false,
+          "description": "the appliance brand, if the user mentioned or implied one, e.g. samsung, lg, sony, epson"
+        },
+        {
+          "name": "device_type",
+          "type": "string",
+          "required": false,
+          "description": "tv, projector, audio or ac; pass it explicitly on follow-up requests ('volume down') where the appliance is known from earlier in the conversation but not named again"
+        },
+        {
+          "name": "function",
+          "type": "string",
+          "required": false,
+          "description": "power, volume_up, volume_down, mute, channel_up, channel_down or input; inferred from the request when omitted"
+        },
+        {
+          "name": "search_online",
+          "type": "boolean",
+          "required": false,
+          "description": "search the online IR database (IRDB) for this attempt instead of the built-in codes. Set it when the user reports that a previous attempt did not work, or asks for more codes to be tried. Requires a brand: the database is far too large to search without one. Slower than the built-in table, since the codes are fetched over the network."
+        }
+      ],
+      "returns": "which codes were selected and why, where they came from (built-in table or the online database), how many were sent, and whether the user confirmed that the appliance responded",
+      "status": "implemented"
     },
     {
       "name": "agent.confirm_authorized_action",
@@ -775,7 +968,12 @@
       "description": "A mandatory safety gate before any device command that transmits/acts upon the real world (subghz.replay, nfc.emulate, ir.send, and every offensive Wi-Fi/BLE command: wifi.attack_*, wifi.evil_portal, wifi.karma, ble.spam_*): the agent explicitly asks the user to confirm that they own the target or are authorized to test it, before sending the command. It executes nothing by itself, it only validates the intent.",
       "uses": ["subghz.replay", "nfc.emulate", "ir.send", "wifi.attack_deauth", "wifi.attack_deauth_all", "wifi.attack_beacon_random", "wifi.attack_beacon_list", "wifi.attack_beacon_clone", "wifi.attack_probe_flood", "wifi.attack_rickroll", "wifi.evil_portal", "wifi.karma", "ble.spam_apple", "ble.spam_android", "ble.spam_samsung", "ble.spam_windows", "ble.spam_all", "ble.spam_airtag"],
       "args": [
-        { "name": "action", "type": "string", "required": true, "description": "the name of the device command about to be sent" }
+        {
+          "name": "action",
+          "type": "string",
+          "required": true,
+          "description": "the name of the device command about to be sent"
+        }
       ],
       "returns": "confirmation or refusal, with the reason",
       "status": "planned"
