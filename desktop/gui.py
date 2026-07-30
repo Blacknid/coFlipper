@@ -37,11 +37,22 @@ from tkinter import ttk
 
 from dotenv import load_dotenv
 
-from agent import MODEL, build_chat, maybe_compact, run_turn
+from agent import (
+    MODEL,
+    SELECTABLE_MODELS,
+    ModelOverloaded,
+    TurnCancelled,
+    build_chat,
+    maybe_compact,
+    rebuild_chat,
+    run_turn,
+)
 from commands import CommandDispatcher, load_catalog, model_commands
 from memory import MemoryStore
 from reasoning import ANSWER, REPORT, REQUEST, SPAWN, THOUGHT, TOOL, plain_text
+from settings import Settings
 from subagents import SubagentRunner
+import voice
 
 # The qFlipper palette: an almost black background, a single orange accent (#FF8200 is
 # the orange from the Flipper Zero identity), everything else in shades of gray.
@@ -66,6 +77,13 @@ MERGE_PURPLE = "#B08CE0"
 # For addresses the agent reached over the network (the online IR database): a link blue,
 # so a visited source reads as a link would.
 WEB_BLUE = "#6FA8DC"
+# A darker red for the stop button's hover/pressed state (ERR_RED is the base).
+ERR_RED_DARK = "#C25858"
+
+# The one input button carries no label: an up-arrow to send, a filled square to stop the
+# turn in progress - the same suggestive, text-free composer control Claude uses.
+SEND_GLYPH = "↑"
+STOP_GLYPH = "■"
 
 # How often the presence of the device is checked. Checking means no more than reading
 # the list of serial ports, so a short interval does not load the system.
@@ -135,6 +153,8 @@ class ChatSession:
         self.window = window
         self.name = name
         self.busy = False
+        # Set true when the user presses stop; the worker's turn checks it and aborts.
+        self._cancel = False
         # Step numbering restarts with every request: the chain is read per current turn.
         self.step_no = 0
         self.chain_used = False
@@ -155,6 +175,10 @@ class ChatSession:
             "answer": {"buf": "", "complete": False, "data": None},
             "thought": {"buf": "", "complete": False, "data": None},
         }
+        # Voice input: the push-to-talk recorder, and a flag for the timer that updates the
+        # button's "recording…" label while the user is speaking.
+        self._recorder = None
+        self._mic_tick_pending = False
         # The last answer and the commands behind it, kept for the merge.
         self.last_answer = None
         self.last_commands = []
@@ -164,11 +188,15 @@ class ChatSession:
         # rest independent.
         self.requests = []
 
+        # The model backing this chat: whatever the picker had selected when the tab opened.
+        # Kept per-tab, so different chats can run on different models at the same time.
+        self.model = window.selected_model
         # A fresh, independent conversation, seeded with the persistent memory. build_chat
         # also returns the client, which has to be kept alive for as long as the chat is
         # used (see build_chat).
         self.genai_client, self.chat = build_chat(
-            window.api_key, window.commands, window.dispatcher.simulated, window.memory_prompt()
+            window.api_key, window.commands, window.dispatcher.simulated, window.memory_prompt(),
+            model=self.model,
         )
 
         self.frame = tk.Frame(window.notebook, bg=BG)
@@ -229,40 +257,154 @@ class ChatSession:
         self.entry.pack(fill="x", padx=14, pady=11)
         self.entry.bind("<Return>", lambda _event: self.on_send())
 
+        # Voice input: a push-to-talk button, offered only when a microphone is actually
+        # usable (the library and a device are present). The spoken message is sent as audio;
+        # the model hears and transcribes it in the same turn.
+        if voice.is_available():
+            self.mic_button = tk.Button(
+                bar,
+                text="🎤",
+                command=self.on_mic,
+                bg=BG_CARD,
+                fg=FG,
+                font=self.window.font_bold,
+                relief="flat",
+                padx=16,
+                pady=10,
+                activebackground=BORDER,
+                cursor="hand2",
+                borderwidth=0,
+                highlightthickness=0,
+            )
+            self.mic_button.grid(row=0, column=1, padx=(0, 8))
+        else:
+            self.mic_button = None
+
+        # One text-free button that doubles as send and stop: an up-arrow to send, a square to
+        # stop the turn in progress (like Claude's composer). It routes through one handler that
+        # decides which it is from whether the chat is currently working.
         self.send_button = tk.Button(
             bar,
-            text="TRIMITE",
-            command=self.on_send,
+            text=SEND_GLYPH,
+            command=self._on_send_or_stop,
             bg=ORANGE,
             fg="#141518",
             font=self.window.font_bold,
             relief="flat",
-            padx=26,
-            pady=10,
+            padx=18,
+            pady=8,
             activebackground=ORANGE_DARK,
             activeforeground="#141518",
             cursor="hand2",
             disabledforeground="#6A6A72",
             borderwidth=0,
             highlightthickness=0,
+            width=2,
         )
-        self.send_button.grid(row=0, column=1)
+        self.send_button.grid(row=0, column=2)
         self.send_button.bind("<Enter>", lambda _e: self._hover_send(True))
         self.send_button.bind("<Leave>", lambda _e: self._hover_send(False))
 
         self.set_input_enabled(True)
 
+    def _on_send_or_stop(self):
+        """The composer button: stop when a turn is running, send otherwise."""
+        if self.busy:
+            self.on_stop()
+        else:
+            self.on_send()
+
+    def _refresh_send_button(self):
+        """Puts the button in its current role: a square stop while the chat works, an up-arrow
+        send when it is idle. Always clickable - the stop must stay live while everything else
+        in the composer is disabled."""
+        if self.busy:
+            self.send_button.configure(
+                text=STOP_GLYPH, bg=ERR_RED, activebackground=ERR_RED_DARK, state="normal"
+            )
+        else:
+            self.send_button.configure(
+                text=SEND_GLYPH, bg=ORANGE, activebackground=ORANGE_DARK, state="normal"
+            )
+
     def _hover_send(self, hovering):
         if str(self.send_button["state"]) == "disabled":
             return
-        self.send_button.configure(bg=ORANGE_DARK if hovering else ORANGE)
+        if self.busy:  # stop role
+            self.send_button.configure(bg=ERR_RED_DARK if hovering else ERR_RED)
+        else:
+            self.send_button.configure(bg=ORANGE_DARK if hovering else ORANGE)
 
     def set_input_enabled(self, enabled):
         state = "normal" if enabled else "disabled"
         self.entry.configure(state=state)
-        self.send_button.configure(state=state, bg=ORANGE if enabled else BG_CARD)
+        # The send/stop button is managed by _refresh_send_button, not here: while the chat
+        # works, the composer is disabled but that button stays live as the stop control.
+        self._refresh_send_button()
+        # The mic is disabled while a turn runs too - unless a recording is in progress, whose
+        # own Stop must stay clickable so the user can finish speaking.
+        if self.mic_button is not None and not (self._recorder and self._recorder.recording):
+            self.mic_button.configure(state=state)
         if enabled:
             self.entry.focus_set()
+
+    def on_stop(self):
+        """The user pressed stop. The worker's turn checks the flag at its next boundary and
+        aborts; the button is parked until that lands as a 'stopped' event, so a second click
+        does nothing in the meantime."""
+        if not self.busy:
+            return
+        self._cancel = True
+        self.set_local_status("se oprește...", WARN_YELLOW)
+        self.send_button.configure(state="disabled")
+
+    def on_mic(self):
+        """Push-to-talk: first click starts recording, second click stops and sends.
+
+        The spoken message travels as audio; the model transcribes and acts on it in the same
+        turn. Recording runs on the SDK's callback thread, so the interface stays live and a
+        timer can tick the button's label up while the user speaks."""
+        if self.busy and not (self._recorder and self._recorder.recording):
+            return
+        if self._recorder and self._recorder.recording:
+            self._stop_recording_and_send()
+            return
+        try:
+            self._recorder = voice.Recorder()
+            self._recorder.start()
+        except Exception as exc:  # noqa: BLE001 - a device grabbed by another app, etc.
+            self._recorder = None
+            self.set_local_status(f"microfonul nu a putut porni: {exc}", ERR_RED)
+            return
+        # Block the text path while recording, but keep the mic (now a Stop button) live.
+        self.entry.configure(state="disabled")
+        self.send_button.configure(state="disabled", bg=BG_CARD)
+        self.mic_button.configure(text="⏹", bg=ERR_RED, fg="#141518")
+        self._mic_tick_pending = True
+        self._update_mic_label()
+
+    def _update_mic_label(self):
+        if not (self._recorder and self._recorder.recording):
+            self._mic_tick_pending = False
+            return
+        self.set_local_status(f"🎤 înregistrez… {self._recorder.duration:0.0f}s", ERR_RED)
+        self.window.root.after(200, self._update_mic_label)
+
+    def _stop_recording_and_send(self):
+        recorder, self._recorder = self._recorder, None
+        self._mic_tick_pending = False
+        wav = recorder.stop()
+        # Length from the WAV payload (44-byte header, 2 bytes/sample, 16 kHz mono) - the
+        # recorder's own duration is 0 now that stop() has cleared its frames.
+        seconds = max(0.0, (len(wav) - 44) / (voice.SAMPLE_RATE * voice.SAMPLE_WIDTH))
+        self.mic_button.configure(text="🎤", bg=BG_CARD, fg=FG)
+        if len(wav) <= 44:  # nothing captured
+            self.set_local_status("nu am înregistrat nimic", FG_DIM)
+            self.set_input_enabled(True)
+            return
+        label = f"🎤 mesaj vocal ({seconds:0.0f}s)"
+        self._send(message="", attachment={"bytes": wav, "mime_type": voice.MIME_TYPE},
+                   display=label)
 
     def set_local_status(self, text, color=FG_DIM):
         self.status_label.configure(text=text, fg=color)
@@ -298,6 +440,12 @@ class ChatSession:
         elif kind == "error":
             self._reset_typers()
             self._append(self.transcript, payload + "\n\n", "error")
+            self._finish()
+        elif kind == "stopped":
+            # The turn was cancelled: stop revealing any buffered text, keep what is already on
+            # screen, and mark the interruption so it is clear the answer is incomplete.
+            self._reset_typers()
+            self._append(self.transcript, "· oprit ·\n\n", "system")
             self._finish()
         elif kind == "compacted":
             self._append(
@@ -570,19 +718,33 @@ class ChatSession:
         if not message:
             return
         self.entry.delete(0, "end")
+        self._send(message)
+
+    def _send(self, message, attachment=None, display=None):
+        """Starts a turn, from typed text or a spoken (attachment) message.
+
+        `display` is what the user's bubble and the merge should show when the request has no
+        text of its own - a voice message shows "🎤 mesaj vocal (Ns)" rather than an empty
+        line. The audio itself goes only to the worker, as the attachment."""
+        if self.busy:
+            return
+        shown = display or message
         self.busy = True
+        self._cancel = False
         self._commands = []
         self._answer_started = False
         self._live_thought = None
         self._reset_typers()
-        self.requests.append(message)
+        self.requests.append(shown)
         self.set_input_enabled(False)
-        self.window._emit("user", message, session=self)
+        self.window._emit("user", shown, session=self)
         self.window._emit("thinking", "lucrează...", session=self)
         self.window._on_session_started(self)
-        threading.Thread(target=self._worker, args=(message,), daemon=True).start()
+        threading.Thread(
+            target=self._worker, args=(message,), kwargs={"attachment": attachment}, daemon=True
+        ).start()
 
-    def _worker(self, message):
+    def _worker(self, message, attachment=None):
         def on_step(step):
             # The command names this chat ran, collected for the merge. Only the main
             # agent's own device calls (depth 0), not the subagents' internal ones.
@@ -596,7 +758,10 @@ class ChatSession:
             self.window._emit(channel + "_delta", text, session=self)
 
         try:
-            reply, _trace = run_turn(self.chat, self.window.dispatcher, message, on_step, on_delta)
+            reply, _trace = run_turn(
+                self.chat, self.window.dispatcher, message, on_step, on_delta,
+                attachment=attachment, should_stop=lambda: self._cancel,
+            )
             self.last_answer = reply or "(raspuns gol)"
             self.last_commands = list(self._commands)
             self.window._emit("agent", reply or "(raspuns gol)", session=self)
@@ -610,9 +775,17 @@ class ChatSession:
                 self.window.dispatcher.simulated,
                 self.window.memory_prompt(),
                 on_summary=lambda _s, dropped: self.window._emit("compacted", dropped, session=self),
+                model=self.model,
             )
+        except TurnCancelled:
+            # The user pressed stop; end the turn quietly, keeping whatever was shown so far.
+            self.window._emit("stopped", None, session=self)
         except SystemExit as exc:
             # send_with_retry exits via sys.exit when the model is unavailable on the plan.
+            self.window._emit("error", str(exc), session=self)
+        except ModelOverloaded as exc:
+            # A passing Google-side 503 that outlasted the retries: show its own clear message,
+            # not a raw "ModelOverloaded: ..." - the user did nothing wrong and can just retry.
             self.window._emit("error", str(exc), session=self)
         except Exception as exc:
             self.window._emit("error", f"{type(exc).__name__}: {exc}", session=self)
@@ -628,9 +801,17 @@ class CoFlipperWindow:
         self.api_key = None
         self.commands = None
         self.memory = MemoryStore()
+        self.settings = Settings()
         self.closing = False
         self.sessions = []
         self._session_counter = 0
+        # The model new chats are created with, chosen from the top-bar picker. A tab keeps
+        # whatever model it was created with (shown in the picker when the tab is active), and
+        # switching the picker moves the active tab onto the new model too.
+        # The choice is remembered across restarts (settings.json). An explicit COFLIPPER_MODEL
+        # in the environment is a deliberate override and still wins over the saved preference.
+        env_model = os.environ.get("COFLIPPER_MODEL")
+        self.selected_model = env_model or self.settings.get("model", MODEL)
         # A merge is a model request, so it is never spent twice on the same state: the
         # button stays disabled after a merge until at least one chat answers again, and
         # while a merge is in flight. _merge_signature() captures what was last merged.
@@ -718,6 +899,32 @@ class CoFlipperWindow:
             background=[("selected", BG_PANEL)],
             foreground=[("selected", ORANGE)],
         )
+        # The model picker, restyled for the dark theme (clam's default combobox is a bright
+        # white field). The dropdown list is a Tk option, not a ttk one, so it is set through
+        # the option database below.
+        style.configure(
+            "coFlipper.TCombobox",
+            fieldbackground=BG_CARD,
+            background=BG_CARD,
+            foreground=FG,
+            arrowcolor=FG_DIM,
+            bordercolor=BORDER,
+            lightcolor=BORDER,
+            darkcolor=BORDER,
+            relief="flat",
+            padding=(8, 4),
+        )
+        style.map(
+            "coFlipper.TCombobox",
+            fieldbackground=[("readonly", BG_CARD)],
+            foreground=[("readonly", FG)],
+            selectbackground=[("readonly", BG_CARD)],
+            selectforeground=[("readonly", FG)],
+        )
+        self.root.option_add("*TCombobox*Listbox.background", BG_CARD)
+        self.root.option_add("*TCombobox*Listbox.foreground", FG)
+        self.root.option_add("*TCombobox*Listbox.selectBackground", ORANGE)
+        self.root.option_add("*TCombobox*Listbox.selectForeground", "#141518")
 
     def _build_layout(self):
         self.root.columnconfigure(0, weight=1)
@@ -734,7 +941,28 @@ class CoFlipperWindow:
         tk.Label(bar, text="co", bg=BG, fg=FG, font=self.font_brand).pack(side="left")
         tk.Label(bar, text="Flipper", bg=BG, fg=ORANGE, font=self.font_brand).pack(side="left")
 
-        tk.Label(bar, text=MODEL, bg=BG, fg=FG_FAINT, font=self.font_small).pack(side="right")
+        # The model picker: which Gemini model the chats talk to. It shows the active tab's
+        # model, and changing it moves that tab (and every new tab) onto the chosen model.
+        self.model_var = tk.StringVar(value=self.selected_model)
+        # The saved/overridden model is always offered, even if it is not one of the built-in
+        # choices (a custom COFLIPPER_MODEL, say), so the picker can show what is actually in use.
+        model_values = list(SELECTABLE_MODELS)
+        if self.selected_model not in model_values:
+            model_values.insert(0, self.selected_model)
+        self.model_picker = ttk.Combobox(
+            bar,
+            textvariable=self.model_var,
+            values=model_values,
+            state="readonly",
+            style="coFlipper.TCombobox",
+            width=22,
+            font=self.font_small,
+        )
+        self.model_picker.pack(side="right")
+        self.model_picker.bind("<<ComboboxSelected>>", self._on_model_change)
+        tk.Label(bar, text="model", bg=BG, fg=FG_FAINT, font=self.font_small).pack(
+            side="right", padx=(0, 8)
+        )
 
         # The controls for the parallel chats live here, to the right of the brand.
         controls = tk.Frame(bar, bg=BG)
@@ -785,6 +1013,8 @@ class CoFlipperWindow:
         state = "normal" if enabled else "disabled"
         for button in (self.new_button, self.close_button, self.merge_button, self.memory_button):
             button.configure(state=state)
+        # The picker is a readonly combobox when usable, fully disabled before the app is ready.
+        self.model_picker.configure(state="readonly" if enabled else "disabled")
 
     def memory_prompt(self):
         return self.memory.as_prompt() if self.memory else ""
@@ -916,6 +1146,9 @@ class CoFlipperWindow:
 
         self.notebook = ttk.Notebook(holder, style="coFlipper.TNotebook")
         self.notebook.grid(row=0, column=0, sticky="nsew")
+        # When the user switches tab, the picker follows: it always shows the model of the
+        # chat currently in front.
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
         # The merge tab: always the last one, read-only, populated when the user merges.
         self.merge_frame = tk.Frame(self.notebook, bg=BG)
@@ -1057,6 +1290,48 @@ class CoFlipperWindow:
             if str(session.frame) == current:
                 return session
         return None
+
+    def _on_tab_changed(self, _event=None):
+        """Keeps the picker showing the front tab's model (the merge tab has none of its own,
+        so the picker simply keeps its last value there)."""
+        session = self._active_session()
+        if session is not None and getattr(self, "model_var", None) is not None:
+            self.model_var.set(session.model)
+
+    def _on_model_change(self, _event=None):
+        """The user picked a model. It becomes the default for new chats, and the active chat
+        is moved onto it right away - carrying its whole history, so the conversation continues
+        rather than restarting. A chat mid-turn is left alone (its worker is using the chat),
+        and the picker snaps back until the turn is done."""
+        chosen = self.model_var.get()
+        session = self._active_session()
+        if session is not None and session.busy:
+            # Cannot swap the chat object out from under a running turn; revert and say so.
+            self.model_var.set(session.model)
+            session.set_local_status("schimbă modelul după ce se termină tura", WARN_YELLOW)
+            return
+        self.selected_model = chosen
+        # Remember the choice so the next launch opens on the same model.
+        self.settings.set("model", chosen)
+        # Subagents are shared (one dispatcher); point them at the chosen model too.
+        if self.dispatcher is not None and getattr(self.dispatcher, "subagents", None) is not None:
+            self.dispatcher.subagents.model = chosen
+        if session is not None and session.model != chosen:
+            previous = session.model
+            session.model = chosen
+            session.chat = rebuild_chat(
+                session.genai_client,
+                session.chat,
+                self.commands,
+                self.dispatcher.simulated,
+                self.memory_prompt(),
+                model=chosen,
+            )
+            session._append(
+                session.transcript,
+                f"· model schimbat: {previous} → {chosen} (conversația continuă) ·\n\n",
+                "system",
+            )
 
     def _close_active_session(self):
         if len(self.sessions) <= 1:

@@ -1,3 +1,6 @@
 google-genai
 python-dotenv
 pyserial
+# Optional: microphone capture for voice messages. If absent, the GUI simply does not offer
+# the mic button - everything else works unchanged.
+sounddevice

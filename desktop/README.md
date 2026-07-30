@@ -14,7 +14,11 @@ The `.env` file is excluded from git and must not be published.
 
 ### Choosing the model
 
-The model is set explicitly in `agent.py` and can be changed, without modifying the code, through the `COFLIPPER_MODEL` environment variable. We deliberately avoided aliases of the `gemini-flash-latest` kind: these always track the most recent generation, and usage limits differ substantially from one generation to the next.
+The model can be chosen **in the application**: a picker in the top bar lists the chat-capable Gemini models (`SELECTABLE_MODELS` in `agent.py`) and switches the model live. It works per chat — different tabs can run on different models at once — and the picker always shows the model of the tab in front. Switching a tab's model carries its whole conversation over (`rebuild_chat`), so it continues rather than restarting; the shared subagents follow the choice too; a chat mid-turn is left alone until it finishes. This is the same reason a spoken request and a typed one behave identically: both go through one turn, so the model, the reasoning chain and the streaming are the same whichever way the request arrived.
+
+The choice is **remembered across restarts**: the picked model is written to `settings.json` (user runtime data, gitignored, like the memory) and restored when the application opens again, so it does not reset to the default every launch. The starting model is set in `agent.py` and can also be changed, without touching the code, through the `COFLIPPER_MODEL` environment variable, which is a deliberate override and wins over the saved preference (whatever it is set to is always offered in the picker). We deliberately avoided aliases of the `gemini-flash-latest` kind as the *default*: these always track the most recent generation, and usage limits differ substantially from one generation to the next.
+
+When one model is momentarily overloaded (a `503`), coFlipper does not fail on the first try: it rides the spike out with several retries and a growing wait (`COFLIPPER_SERVER_RETRIES`, six by default). Only if the overload outlasts them does it surface — as a plain message saying it is a passing Google-side spike and suggesting the picker or another model, not a stack trace — and the conversation stays alive.
 
 Practical findings from during development, on the free plan:
 
@@ -168,6 +172,8 @@ Each tab has its own status line under the panels: while a chat is working it sh
 
 The reply is streamed, not shown whole at the end: the answer types itself out as the model produces it, the commands appear in the chain the moment they run, and the status line previews the reasoning as it streams. The turn is built round by round from `send_message_stream`, so a long answer no longer looks like a frozen window followed by a wall of text — it arrives the way it is written.
 
+The composer has a single, text-free button, like Claude's: an up-arrow to send, which turns into a stop square the moment a turn starts. Pressing stop cancels the work in progress — the turn checks a flag at its natural boundaries (between rounds, between streamed chunks, before each tool call) and aborts with `TurnCancelled`, so a stop takes effect within a moment rather than the instant it is pressed (a thread cannot be killed safely mid-request). What was already shown stays on screen, marked `· oprit ·`, and the composer returns to the send arrow. Because the check is cooperative, it never leaves the device mid-command: it stops before the next one, not in the middle of one.
+
 ## Parallel chats and merge
 
 A chat is not the whole window; it is one tab. The `+ chat nou` button opens another, and each tab is a fully independent conversation with the model: its own history, its own reasoning chain, its own Gemini chat session. They run at the same time, each on its own worker thread, so several lines of work advance in parallel while the user reads or types in any one of them. The top bar shows how many are working at once.
@@ -187,6 +193,14 @@ The short-term memory is the conversation's own history: the model sees every ea
 The long-term memory is `memory.py`: a small set of durable facts the agent chose to keep, written to disk (`memory.json`) so they survive a restart and are loaded back into every new conversation. The model writes to it through the `agent_remember` tool — for things worth keeping across sessions, like the brand of a device the user owns, a preference, or a lasting finding — and reads from it automatically, since each session is built with the current memories folded into its system instruction. It is told not to store secrets or one-off values. The interface shows exactly what is remembered (the "🧠 memorie" button) and lets the user wipe it, because memory a user cannot inspect is memory they cannot trust. The memory is shared by every tab, since it belongs to the user, not to one conversation; a compaction re-reads it, so a fact remembered mid-session is folded into the rebuilt chat.
 
 Together with the stopping conditions already in place — a turn ends when the model asks for no further command, and every subagent runs under a hard round budget — these give the agentic loop its memory, its context management and its halting.
+
+## Voice input
+
+A request need not be typed. The mic button (🎤) in each chat records a spoken message — push to talk, click again to stop — and sends it to the model as audio. There is no separate speech-to-text step: Gemini understands the audio directly, so it transcribes and acts on the request in the same turn, the same way it would a typed one. A spoken "turn off my Samsung television" reaches the model as sound, and comes out as an `agent_ir_control` call with the brand and function already worked out.
+
+The audio rides only on the first round of the turn; the later rounds, which answer the model's tool calls, stay text, so the model never re-hears the same message. The recording is captured at 16 kHz mono — enough for speech, a fraction of the upload of CD-quality audio. Microphone capture is an optional dependency (`sounddevice`): if it or a microphone is missing, the button simply is not offered and everything else works unchanged.
+
+Two things keep the transcription honest. Left to guess, the model sometimes mis-detects the language of a short phrase — a Romanian "Cum te cheamă" heard as Italian, since the two sound alike — and then answers in the wrong language. So a spoken turn carries a short hint that **pins the language** (`COFLIPPER_VOICE_LANG`, Romanian by default) and tells the model not to drift to a similar-sounding one. The hint also asks the model to **begin its reply by restating what it heard** (`Am auzit: "…"`), so a mishearing shows on screen instead of passing silently — the user can see at a glance whether it understood them. The hint is added only for audio, never for a typed message.
 
 ## Bringing up the connection
 
@@ -226,6 +240,8 @@ It can also be used as a module, which is how `agent.py` obtains its client:
 | subagents.py | the subagents: specialised assistants the main agent delegates to |
 | merge.py | the synthesiser that merges the results of several parallel chats into one |
 | memory.py | the agent's persistent memory: durable facts kept across sessions on disk |
+| voice.py | microphone capture for spoken messages, packed into a WAV the model hears directly |
+| settings.py | interface preferences kept across restarts (the picked model), in a small JSON file |
 | commands.py | conversion of the commands.json catalog into Gemini tools, and dispatching of calls |
 | ir_bruteforce.py | the IR control/bruteforce orchestration behind the agent.ir_control tool |
 | ir_codes.py | the built-in table of infrared codes, by appliance type and brand |
@@ -254,6 +270,8 @@ Scenarios verified on the physical device:
 The graphical interface was verified separately, with the simulated device: connecting, correct enabling of the controls, sending a request, displaying the executed commands and the final response, as well as handling errors without freezing the window. The parallel chats were checked the same way: opening and closing tabs, each tab holding its own independent conversation, all of them sharing the one dispatcher, and the merge becoming available only once at least two chats have answered. The subject-aware merge itself was run against the real Gemini API with three chats — two studying the same frequency and one scanning Wi-Fi — and it correctly merged the first two into a single conclusion while keeping the third independent, each finding kept tied to the chat that produced it.
 
 Memory and context management were verified against the real Gemini API too. Persistent memory: the agent, told a durable fact in one chat, saved it through `agent_remember`, and a brand-new chat — a separate conversation — recalled it from the loaded memory. Context compaction: a chat driven past a lowered turn budget was compacted, its history shrinking to a summary plus the recent turns while it kept answering coherently, and the summary preserved the facts rather than dropping them.
+
+Voice input was verified against the real Gemini API end to end: a spoken message ("turn off my Samsung television") was captured to a WAV and sent as audio, with no text alongside it. The model transcribed the speech on its own and answered in the same turn — it called `agent_ir_control` with `brand=samsung`, `device_type=tv`, `function=power`, ran the IR attempt on the simulated device, and phrased the result honestly, noting the simulated mode. The plumbing around it is covered without quota by a scripted test: the audio reaches the model only on the first round and never again on the tool-response rounds, a text turn still sends a plain string, and `voice.py` produces a 16 kHz mono WAV of the expected length.
 
 Two test suites cover the parts that can be checked without hardware and without the API. Both run in under a second and can be repeated freely, since the model is replaced by a scripted set of responses:
 

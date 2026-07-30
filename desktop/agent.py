@@ -28,10 +28,61 @@ from reasoning import ANSWER, REPORT, SPAWN, THOUGHT, TOOL, Trace
 # switching model through the COFLIPPER_MODEL environment variable grants a fresh quota.
 MODEL = os.environ.get("COFLIPPER_MODEL", "gemini-3.5-flash")
 
+# The models offered in the interface's picker: the chat-capable Gemini models (function
+# calling + reasoning), not the specialised ones (image, TTS, music, robotics). Ordered
+# newest-first; whatever MODEL is set to is guaranteed to appear, so a custom COFLIPPER_MODEL
+# is still selectable. list_models.py shows everything the key can reach.
+SELECTABLE_MODELS = [
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3-flash-preview",
+    "gemini-3.1-pro-preview",
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
+    "gemini-flash-latest",
+]
+if MODEL not in SELECTABLE_MODELS:
+    SELECTABLE_MODELS.insert(0, MODEL)
+
 # The API occasionally returns 503 when overloaded. Without a retry, such a transient
 # error would interrupt the conversation in progress.
 SEND_RETRIES = 3
 RETRY_DELAY_S = 2.0
+
+# A 503 (the model is momentarily overloaded on Google's side) is transient and usually
+# clears within tens of seconds - so it is worth riding out with several attempts and a
+# growing wait, rather than surfacing to the user after a couple of quick tries. The waits
+# grow (2, 4, 8, 16, 16... seconds, capped) so a longer spike is still caught without
+# hammering the API. Overridable in case a demo needs to fail fast or wait even longer.
+SERVER_RETRIES = int(os.environ.get("COFLIPPER_SERVER_RETRIES", "6"))
+SERVER_BACKOFF_CAP_S = 16.0
+
+# The most attempts any single send makes: server errors get the larger budget, everything
+# else stops sooner (the per-error logic in _retry_after_error decides when to give up).
+MAX_SEND_ATTEMPTS = max(SEND_RETRIES, SERVER_RETRIES)
+
+
+class TurnCancelled(Exception):
+    """The user stopped the turn while it was still running. Raised cooperatively at the turn's
+    checkpoints (between rounds, between streamed chunks, before each tool call), since a
+    running thread cannot be killed safely - so a stop takes effect at the next checkpoint, not
+    necessarily the instant it is pressed."""
+
+
+class ModelOverloaded(Exception):
+    """The model stayed overloaded (503) after every retry. Carries a message the interface
+    can show as-is: it is a passing Google-side spike, not a fault in the request, so the
+    remedy is to try again shortly or switch model - not to change anything."""
+
+    def __init__(self, model):
+        self.model = model
+        super().__init__(
+            f"Modelul {model} este momentan supraîncărcat (503) și a rămas așa după mai multe "
+            f"reîncercări. Este o supraîncărcare temporară la Google, nu o eroare a cererii. "
+            f"Reîncearcă în câteva momente, sau pornește cu alt model prin COFLIPPER_MODEL "
+            f"(de ex. gemini-3.6-flash)."
+        )
 
 # Recent models reason before answering and can return a summary of that reasoning. We
 # request it explicitly: without it, the only thing visible between the user's request and
@@ -169,7 +220,7 @@ def _chat_config(commands, simulated=False, memory_prompt=""):
     )
 
 
-def build_chat(api_key, commands, simulated=False, memory_prompt=""):
+def build_chat(api_key, commands, simulated=False, memory_prompt="", model=None):
     """The conversation session, with the tools derived from the command catalog.
 
     Returns the client as well, not only the chat: the caller has to keep a reference to
@@ -178,10 +229,26 @@ def build_chat(api_key, commands, simulated=False, memory_prompt=""):
 
     memory_prompt is the persistent memory (memory.py) folded into the system instruction,
     so every new conversation starts knowing the facts the agent chose to remember.
+
+    model chooses which Gemini model backs the chat; the interface lets the user pick it per
+    chat. When omitted it falls back to the process default (MODEL / COFLIPPER_MODEL).
     """
     client = genai.Client(api_key=api_key)
-    chat = client.chats.create(model=MODEL, config=_chat_config(commands, simulated, memory_prompt))
+    chat = client.chats.create(
+        model=model or MODEL, config=_chat_config(commands, simulated, memory_prompt)
+    )
     return client, chat
+
+
+def rebuild_chat(client, old_chat, commands, simulated=False, memory_prompt="", model=None):
+    """The same conversation, moved onto a different model. Its whole history carries over, so
+    switching model mid-chat continues where it left off rather than starting blank. Used by
+    the interface's model picker."""
+    return client.chats.create(
+        model=model or MODEL,
+        config=_chat_config(commands, simulated, memory_prompt),
+        history=old_chat.get_history(),
+    )
 
 
 # --- Context management ---------------------------------------------------------
@@ -215,21 +282,23 @@ def _history_text(contents):
     return "\n".join(lines)
 
 
-def _summarize_history(client, contents):
+def _summarize_history(client, contents, model=None):
     chat = client.chats.create(
-        model=MODEL,
+        model=model or MODEL,
         config=types.GenerateContentConfig(system_instruction=SUMMARY_INSTRUCTION),
     )
     response = send_with_retry(chat, "Summarise the conversation so far:\n\n" + _history_text(contents))
     return answer_text(response)
 
 
-def maybe_compact(client, chat, commands, simulated=False, memory_prompt="", on_summary=None):
+def maybe_compact(client, chat, commands, simulated=False, memory_prompt="", on_summary=None,
+                  model=None):
     """Compacts an over-long chat. Returns (chat, compacted): the same chat when it is still
     within budget, or a fresh one seeded with a summary plus the recent turns when it is not.
 
     on_summary(summary, dropped_count) is called when a compaction happens, so the interface
-    can show that the context was compressed instead of it happening invisibly.
+    can show that the context was compressed instead of it happening invisibly. model keeps
+    the compacted chat on the same model the tab was using.
     """
     history = chat.get_history()
     if len(history) <= CONTEXT_TURN_LIMIT:
@@ -241,7 +310,7 @@ def maybe_compact(client, chat, commands, simulated=False, memory_prompt="", on_
         # Nothing old enough to summarise (only possible if the budget is set below the
         # number of turns kept); compacting would grow the history, not shrink it.
         return chat, False
-    summary = _summarize_history(client, older)
+    summary = _summarize_history(client, older, model)
 
     seeded = [
         types.Content(
@@ -253,7 +322,7 @@ def maybe_compact(client, chat, commands, simulated=False, memory_prompt="", on_
         ),
     ] + keep
     new_chat = client.chats.create(
-        model=MODEL, config=_chat_config(commands, simulated, memory_prompt), history=seeded
+        model=model or MODEL, config=_chat_config(commands, simulated, memory_prompt), history=seeded
     )
     if on_summary:
         on_summary(summary, len(older))
@@ -297,10 +366,17 @@ def _retry_after_error(exc, attempt):
     """Handles a transient send error: sleeps before a retry, or re-raises / exits when the
     error is fatal or the retries are spent. Shared by the blocking and streaming senders."""
     if isinstance(exc, errors.ServerError):
-        if attempt == SEND_RETRIES:
-            raise exc
-        print(f"  [gemini] service unavailable ({exc.code}), retrying...")
-        time.sleep(RETRY_DELAY_S * attempt)
+        # 503 and friends are Google-side overload, not our fault and not permanent. Ride
+        # them out with a growing wait; give up only after SERVER_RETRIES with a message that
+        # says what it was and what the user can do about it.
+        if attempt >= SERVER_RETRIES:
+            raise ModelOverloaded(MODEL) from exc
+        wait = min(SERVER_BACKOFF_CAP_S, RETRY_DELAY_S * (2 ** (attempt - 1)))
+        print(
+            f"  [gemini] {MODEL} overloaded ({exc.code}); retry {attempt}/{SERVER_RETRIES - 1} "
+            f"in {wait:.0f}s..."
+        )
+        time.sleep(wait)
         return
     if isinstance(exc, errors.ClientError):
         # Not all models accept the request for reasoning summaries. The API's raw message
@@ -332,7 +408,7 @@ def _retry_after_error(exc, attempt):
 def send_with_retry(chat, message):
     """A blocking send, retrying transient errors. Used by the subagents and the summariser,
     which consume a whole response at once rather than streaming it."""
-    for attempt in range(1, SEND_RETRIES + 1):
+    for attempt in range(1, MAX_SEND_ATTEMPTS + 1):
         try:
             return chat.send_message(message)
         except errors.APIError as exc:
@@ -346,7 +422,7 @@ _STREAM_END = object()
 def _open_stream_with_retry(chat, message):
     """Opens a streaming response and pulls its first chunk, retrying transient errors the
     same way send_with_retry does - they surface as the request is made and first read."""
-    for attempt in range(1, SEND_RETRIES + 1):
+    for attempt in range(1, MAX_SEND_ATTEMPTS + 1):
         try:
             stream = chat.send_message_stream(message)
             first = next(stream, _STREAM_END)
@@ -355,13 +431,16 @@ def _open_stream_with_retry(chat, message):
             _retry_after_error(exc, attempt)
 
 
-def _consume_stream(stream, first, on_thought_delta=None, on_answer_delta=None):
+def _consume_stream(stream, first, on_thought_delta=None, on_answer_delta=None, should_stop=None):
     """Reads a streamed round, emitting text as it arrives, and returns what it amounts to.
 
     Returns (thoughts, answer, calls): the reasoning summaries (each a full string), the
     answer text, and the tool calls requested. The deltas are forwarded live through the two
     callbacks, which is what gives the interface its typing feel; the return value is what the
     turn loop acts on, exactly as if the response had arrived whole.
+
+    should_stop, when it returns True, aborts the stream between chunks with TurnCancelled - so
+    a stop pressed while the model is still streaming its answer takes effect promptly.
     """
     thoughts, current, answer, calls = [], [], [], []
 
@@ -372,6 +451,9 @@ def _consume_stream(stream, first, on_thought_delta=None, on_answer_delta=None):
 
     chunks = [] if first is _STREAM_END else itertools.chain([first], stream)
     for chunk in chunks:
+        if should_stop and should_stop():
+            stream.close()
+            raise TurnCancelled()
         for part in _response_parts(chunk):
             if getattr(part, "thought", False) and getattr(part, "text", None):
                 current.append(part.text)
@@ -392,7 +474,44 @@ def _consume_stream(stream, first, on_thought_delta=None, on_answer_delta=None):
     return thoughts, "".join(answer), calls
 
 
-def run_turn(chat, dispatcher, message, on_step=None, on_delta=None):
+# The language a voice message is assumed to be in. Left to guess, the model sometimes mis-
+# detects a short phrase (a Romanian "Cum te cheamă" heard as Italian, since they sound alike)
+# and then answers in the wrong language. So a spoken turn pins the language explicitly, and
+# asks the model to say back what it heard - a mishearing then shows on screen instead of
+# passing silently. Override the assumed language with COFLIPPER_VOICE_LANG (e.g. "English").
+VOICE_LANGUAGE = os.environ.get("COFLIPPER_VOICE_LANG", "Romanian")
+VOICE_HINT = (
+    "[VOICE MESSAGE] The user spoke this audio instead of typing it. Transcribe it faithfully, "
+    "then act on it. Reply in the SAME language the user actually spoke: unless the audio is "
+    f"clearly in another language, treat it as {VOICE_LANGUAGE} and never answer in a different "
+    "language (in particular, do not confuse it with a similar-sounding one). Begin your reply "
+    "with one short line, in that language, restating what you understood - e.g. 'Am auzit: "
+    "\"...\"' - so a mishearing is visible, then answer normally."
+)
+
+
+def _first_message(message, attachment):
+    """The payload for the opening round: plain text, or text-plus-media when the user spoke
+    or attached something. Only the first round carries the attachment - the later rounds
+    answer the model's tool calls and must stay text, or the model re-hears the same audio.
+
+    A voice message also carries a language hint, so the model does not mis-detect the spoken
+    language and answer in the wrong one (see VOICE_HINT)."""
+    if not attachment:
+        return message
+    parts = []
+    if attachment.get("mime_type", "").startswith("audio/"):
+        parts.append(types.Part.from_text(text=VOICE_HINT))
+    if message and message.strip():
+        parts.append(types.Part.from_text(text=message))
+    parts.append(
+        types.Part.from_bytes(data=attachment["bytes"], mime_type=attachment["mime_type"])
+    )
+    return parts
+
+
+def run_turn(chat, dispatcher, message, on_step=None, on_delta=None, attachment=None,
+             should_stop=None):
     """One conversation turn, building the reasoning chain as it goes.
 
     A turn is not a single exchange of messages: the model may ask for a measurement,
@@ -409,14 +528,26 @@ def run_turn(chat, dispatcher, message, on_step=None, on_delta=None):
     'answer' as it phrases the reply - which is what lets the interface type the answer out
     live instead of showing it whole at the end.
 
+    attachment, when given, is a spoken (or otherwise non-text) message: {"bytes", "mime_type"}.
+    It rides along with the opening request so the model hears it and answers in the same turn.
+
+    should_stop, when it returns True, aborts the turn with TurnCancelled - this is how the
+    interface's stop button cancels work in progress. It is checked at the natural boundaries
+    (between rounds, between streamed chunks, before each tool call), so a stop takes effect
+    within a moment rather than instantly.
+
     Returns (answer, chain).
     """
-    trace = Trace(message)
+    trace = Trace(message or "🎤 mesaj vocal")
 
     def record(step):
         if on_step:
             on_step(step)
         return step
+
+    def check_stop():
+        if should_stop and should_stop():
+            raise TurnCancelled()
 
     def subagent_event(kind, **fields):
         """Turns a subagent's progress into steps of this chain, nested one level.
@@ -450,13 +581,16 @@ def run_turn(chat, dispatcher, message, on_step=None, on_delta=None):
             on_delta("answer", text)
 
     record(trace.first)
-    pending = message
+    pending = _first_message(message, attachment)
     reply = ""
 
     while True:
+        check_stop()
         trace.next_round()
         stream, first = _open_stream_with_retry(chat, pending)
-        thoughts, answer, calls = _consume_stream(stream, first, thought_delta, answer_delta)
+        thoughts, answer, calls = _consume_stream(
+            stream, first, thought_delta, answer_delta, should_stop
+        )
 
         for thought in thoughts:
             record(trace.add_thought(thought))
@@ -467,6 +601,7 @@ def run_turn(chat, dispatcher, message, on_step=None, on_delta=None):
 
         results = []
         for call in calls:
+            check_stop()
             args = dict(call.args or {})
             outcome = dispatcher.dispatch(call.name, call.args, on_subagent_event=subagent_event)
             # A delegated call has already reported itself through subagent_event, spawn
@@ -558,7 +693,13 @@ def main():
             message = input("> ").strip()
             if not message:
                 continue
-            reply, _trace = run_turn(chat, dispatcher, message, log_step)
+            try:
+                reply, _trace = run_turn(chat, dispatcher, message, log_step)
+            except ModelOverloaded as exc:
+                # A passing Google-side overload; keep the session alive so the user can just
+                # ask again rather than losing the whole conversation.
+                print(f"  [gemini] {exc}")
+                continue
             print(reply)
             # After each turn, compact if the history has grown past the budget. The memory
             # is re-read so a fact remembered mid-session is folded into the rebuilt chat.
