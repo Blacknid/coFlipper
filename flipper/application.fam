@@ -4,6 +4,8 @@ App(
     apptype=FlipperAppType.EXTERNAL,
     entry_point="cfp_app_main",
     sources=["cfp_app.c"],
+    # infrared: the IR bruteforce transmits through infrared_send / InfraredMessage.
+    fap_libs=["infrared"],
     stack_size=2 * 1024,
     fap_category="Tools",
     fap_version="0.1",

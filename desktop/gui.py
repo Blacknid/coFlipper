@@ -410,14 +410,32 @@ class CoFlipperWindow:
         self._append(self.tools, f"{name}\n", "call")
         self._append(self.tools, f"  {arg_text}\n", "dim")
         if outcome.get("status") == "ok":
-            self._append(self.tools, f"  OK  {' '.join(outcome['data'])}\n", "ok")
+            # Comenzile de dispozitiv intorc 'data'; cele de agent (ex. bruteforce-ul
+            # IR) intorc un rezumat propriu, deci afisam ce exista.
+            if "data" in outcome:
+                summary = " ".join(outcome["data"])
+            else:
+                summary = outcome.get("message") or outcome.get("outcome") or "gata"
+            self._append(self.tools, f"  OK  {summary}\n", "ok")
         else:
             self._append(self.tools, f"  ERR {outcome.get('error')}\n", "err")
         if outcome.get("simulated"):
             self._append(self.tools, "  (rezultat simulat)\n", "warn")
         self._append(self.tools, "\n")
 
+    def _on_event_ir_progress(self, payload):
+        sent, total = payload
+        self._set_status(f"bruteforce IR: {sent}/{total} coduri trimise", WARN_YELLOW)
+
     # ------------------------------------------------------------- fire de lucru
+
+    def _on_ir_progress(self, sent, total):
+        """Apelat din firul de lucru, in timpul unui bruteforce IR.
+
+        Nu atinge direct widget-urile: Tkinter nu suporta apeluri din alt fir, deci
+        progresul trece prin aceeasi coada de evenimente ca restul mesajelor.
+        """
+        self._emit("ir_progress", (sent, total))
 
     def _connect(self):
         load_dotenv()
@@ -452,7 +470,11 @@ class CoFlipperWindow:
                 self.flipper = LiveDevice()
                 status = "se caută dispozitivul..."
 
-            self.dispatcher = CommandDispatcher(commands, self.flipper)
+            # Bruteforce-ul IR dureaza secunde bune; fara acest apel fereastra ar parea
+            # blocata cat timp Flipper-ul emite codurile.
+            self.dispatcher = CommandDispatcher(
+                commands, self.flipper, on_progress=self._on_ir_progress
+            )
             # Clientul se pastreaza ca atribut, nu ca variabila locala: vezi build_chat.
             self.genai_client, self.chat = build_chat(
                 api_key, commands, self.dispatcher.simulated

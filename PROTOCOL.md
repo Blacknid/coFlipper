@@ -33,16 +33,43 @@ Any other line received on the port (the CLI banner, the `>: ` prompt, log outpu
 
 ## Implemented commands
 
-| Command     | Arguments | Description                                                |
-|-------------|-----------|------------------------------------------------------------|
-| ping        | —         | Checks whether the CFP server responds                     |
-| info        | —         | The device name/model                                      |
-| subghz.rssi | frequency | Signal level (dBm) measured on the given frequency         |
-| exit        | —         | Closes the CFP application on the device (internal use)    |
+| Command       | Arguments                    | Description                                              |
+|---------------|------------------------------|----------------------------------------------------------|
+| ping          | —                            | Checks whether the CFP server responds                   |
+| info          | —                            | The device name/model                                    |
+| subghz.rssi   | frequency                    | Signal level (dBm) measured on the given frequency       |
+| ir.queue      | protocol address command     | Adds one IR code to the pending list                     |
+| ir.bruteforce | [label]                      | Starts transmitting the queued codes                     |
+| ir.status     | —                            | Run state, codes sent, codes queued                      |
+| ir.reset      | —                            | Clears the queued codes                                  |
+| exit          | —                            | Closes the CFP application on the device (internal use)  |
 
 The full catalog, including commands still at the design stage, is in commands.json.
 
 A note on the response of the `subghz.rssi` command: the first value returned is not the requested frequency, but the frequency the radio synthesizer actually managed to generate. The difference, on the order of a few hundred hertz, comes from the finite resolution of the CC1101 circuit and is reported explicitly so that the user knows what was actually measured.
+
+## The IR bruteforce
+
+Sending IR codes is split across four commands rather than one, for two reasons. A CFP v1 frame cannot carry a whole code list (arguments are space-separated, so the list would not fit a single frame), hence `ir.queue` adds one code per frame. And a run takes several seconds — far longer than the client's 2 s read timeout — so `ir.bruteforce` returns the moment the run *starts*, not when it finishes, and progress is polled through `ir.status`.
+
+The run itself happens on the application's main thread, not in the CLI callback: the callback would otherwise block the serial port for the whole sequence and, more importantly, could not observe the buttons. While a run is in progress the device shows "Bruteforcing IR" with a progress bar.
+
+`ir.status` returns `<state> <sent> <queued>`, where state is one of:
+
+| State   | Meaning                                                                       |
+|---------|-------------------------------------------------------------------------------|
+| running | codes are being transmitted                                                    |
+| stopped | the user pressed the middle (OK) button — the appliance reacted to a code       |
+| idle    | no run in progress, or the queue was exhausted without the user confirming      |
+
+The distinction between `stopped` and `idle` is the whole result of the operation: `stopped` means a code worked, `idle` after a run means none did.
+
+    > cfp 4 ir.queue Samsung32 0x07 0x02
+    < CFP/1 4 OK 1
+    > cfp 5 ir.bruteforce samsung-tv
+    < CFP/1 5 OK started 1
+    > cfp 6 ir.status
+    < CFP/1 6 OK stopped 1 1
 
 ## Error codes
 
@@ -52,3 +79,8 @@ A note on the response of the `subghz.rssi` command: the first value returned is
 | unknown_command    | The command is not recognized by the device                        |
 | missing_frequency  | The command requires a frequency but received no argument          |
 | invalid_frequency  | The frequency is outside the ranges supported by the radio module  |
+| missing_code       | ir.queue did not receive all three of protocol, address, command   |
+| unknown_protocol   | The IR protocol name is not one the firmware knows                 |
+| busy               | A bruteforce is already in progress                                |
+| queue_full         | The IR queue is full (32 codes)                                    |
+| empty_queue        | ir.bruteforce was called with no codes queued                      |
