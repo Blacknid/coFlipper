@@ -298,6 +298,12 @@ class CommandDispatcher:
         if command["name"] == "agent.replay_subghz":
             return self._replay_subghz(call_args)
 
+        if command["name"] == "agent.capture_raw":
+            return self._capture_raw(call_args)
+
+        if command["name"] == "agent.replay_raw":
+            return self._replay_raw(call_args)
+
         if command["name"] == "agent.run_script":
             from scripting import run_script
 
@@ -336,26 +342,115 @@ class CommandDispatcher:
 
         The listener saves each harvest as a descriptively named .sub in the apps_assets store;
         replay refers to one the way the user would ('replay the doorbell one'), so this resolves
-        that name to the file on disk, then sends the device-layer subghz.replay with the real
-        path. Resolution is deliberately strict: an ambiguous or unknown name is reported back,
-        with the available captures listed, rather than guessed at - replaying the wrong signal is
-        exactly the mistake to avoid. This is an OFFENSIVE action (the radio transmits); the model
-        is instructed by the catalog to confirm the user's authorization before calling it.
+        that name to the capture on disk. Resolution is deliberately strict: an ambiguous or
+        unknown name is reported back, with the available captures listed, rather than guessed at
+        - replaying the wrong signal is exactly the mistake to avoid.
+
+        What travels to the device is NOT the file path: the .sub lives here on the desktop, and
+        the firmware has no way to read it. Instead the capture's decoded parameters (frequency,
+        protocol, bit-length, key) are sent as subghz.send, and the firmware re-encodes them with
+        the protocol encoder and keys the radio. This is an OFFENSIVE action (the radio
+        transmits); the model is instructed by the catalog to confirm the user's authorization
+        before calling it.
         """
         from subghz_store import SubGhzStore
 
         name = (call_args.get("name") or "").strip()
         if not name:
             return {"status": "error", "error": "the 'name' argument (the capture to replay) is required"}
+        store = SubGhzStore()
         try:
-            stem, path = SubGhzStore().resolve(name)
+            stem, path = store.resolve(name)
         except LookupError as exc:
             return {"status": "error", "error": str(exc)}
 
-        outcome = self.dispatch_device("subghz_replay", {"file": str(path)})
+        params = store.params(stem)
+        if not params or not params.get("protocol") or params.get("frequency") in (None, ""):
+            return {
+                "status": "error",
+                "error": (
+                    f"the capture '{stem}' has no decoded protocol/frequency recorded, so it "
+                    "cannot be re-encoded for transmission"
+                ),
+            }
+
+        outcome = self.dispatch_device(
+            "subghz_send",
+            {
+                "frequency": params["frequency"],
+                "protocol": params["protocol"],
+                "bits": params.get("bits") or 0,
+                "key": params.get("key") or "0x0",
+            },
+        )
         if outcome.get("status") == "ok":
             outcome["replayed"] = stem
             outcome["path"] = str(path)
+            outcome["sent"] = {
+                "frequency": params["frequency"],
+                "protocol": params["protocol"],
+                "bits": params.get("bits") or 0,
+                "key": params.get("key"),
+            }
+        return outcome
+
+    def _capture_raw(self, call_args):
+        """Captures a raw Sub-GHz waveform to the Flipper under a caller-chosen name, records it
+        so it can be listed and replayed later, and reports the saved name. Passive: it only
+        receives. The .sub itself is written on the device by subghz.read_raw; here we send that
+        command and, on success, keep a small desktop record (name + context) for replay-by-name.
+        The name comes from what the user said, so the capture is findable the way they refer to
+        it - see agent.capture_raw in the catalog.
+        """
+        from subghz_store import SubGhzStore
+
+        name = (call_args.get("name") or "").strip()
+        if not name:
+            return {"status": "error", "error": "the 'name' argument (what to save the capture as) is required"}
+        frequency = call_args.get("frequency") or 433_920_000
+        seconds = call_args.get("time")
+        timeout_ms = int(seconds) * 1000 if seconds else 5000
+
+        outcome = self.dispatch_device(
+            "subghz_read_raw",
+            {"frequency": frequency, "name": name, "timeout_ms": timeout_ms},
+        )
+        if outcome.get("status") != "ok":
+            return outcome
+
+        data = outcome.get("data") or []
+        # 'captured <samples> <name>' on success, 'no_signal' if the window was empty.
+        if data and data[0] == "captured":
+            samples = int(data[1]) if len(data) > 1 and str(data[1]).isdigit() else None
+            saved_name = data[2] if len(data) > 2 else name
+            SubGhzStore().save_raw(name=saved_name, frequency=frequency, samples=samples)
+            outcome["captured"] = saved_name
+            outcome["samples"] = samples
+        else:
+            outcome["captured"] = None  # no_signal: nothing recorded, nothing to replay
+        return outcome
+
+    def _replay_raw(self, call_args):
+        """Replays a raw capture by the name the user refers to it. Resolves the name against the
+        recorded raw captures (exact or unambiguous substring) and sends subghz.send_raw with the
+        exact device-side name. OFFENSIVE: it transmits. The catalog gates it behind the
+        authorization confirmation. An ambiguous or unknown name is reported, with the candidates
+        listed, rather than guessed at - replaying the wrong signal is the mistake to avoid.
+        """
+        from subghz_store import SubGhzStore
+
+        name = (call_args.get("name") or "").strip()
+        if not name:
+            return {"status": "error", "error": "the 'name' argument (the capture to replay) is required"}
+        store = SubGhzStore()
+        try:
+            device_name = store.resolve_raw(name)
+        except LookupError as exc:
+            return {"status": "error", "error": str(exc)}
+
+        outcome = self.dispatch_device("subghz_send_raw", {"name": device_name})
+        if outcome.get("status") == "ok":
+            outcome["replayed"] = device_name
         return outcome
 
     def dispatch_device(self, name, call_args=None):

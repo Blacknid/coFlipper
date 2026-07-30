@@ -44,8 +44,8 @@ def main():
                  "subghz_rssi" in meta["tools"])
     checks.check("it has NO save skill - watching is not harvesting to disk",
                  "save_subghz" not in meta["tools"])
-    checks.check("it has NO replay tool - it is passive, it cannot transmit",
-                 "subghz_replay" not in meta["tools"])
+    checks.check("it has NO transmit tool - it is passive, it cannot transmit",
+                 "subghz_send" not in meta["tools"] and "subghz_replay" not in meta["tools"])
 
     checks.section("2. the watcher stops the instant a signal arrives")
     fresh = CommandDispatcher(model_commands(load_catalog()), MockCFPClient())

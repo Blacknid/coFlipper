@@ -5,8 +5,14 @@ App(
     entry_point="cfp_app_main",
     sources=["cfp_app.c"],
     # infrared: the IR bruteforce transmits through infrared_send / InfraredMessage.
+<<<<<<< HEAD
     # nfc: nfc.read/nfc.watch poll a tag through the Nfc/Iso14443_3a poller API.
     fap_libs=["infrared", "nfc"],
+=======
+    # subghz: subghz.read decodes received signals through the SubGhz receiver/environment
+    #   protocol stack, and subghz.send re-encodes and transmits a decoded signal.
+    fap_libs=["infrared", "subghz"],
+>>>>>>> 0235cf490d58a0b56881f3880d8a9b3b216bd724
     stack_size=2 * 1024,
     fap_category="Tools",
     fap_version="0.1",

@@ -113,20 +113,84 @@
       "status": "implemented"
     },
     {
-      "name": "subghz.replay",
+      "name": "subghz.send",
       "layer": "device",
       "category": "subghz",
       "impact": "offensive",
-      "description": "Retransmits a Sub-GHz signal from a saved .sub file: it reads the file's frequency and code and keys the CC1101 transceiver to re-emit that exact signal. THIS TRANSMITS on the radio and can actuate the real device the signal belongs to (open a gate, trigger a relay), so it is only for testing one's own devices, never someone else's. It takes a raw filesystem path; prefer the agent-layer agent.replay_subghz, which lets the user name a capture descriptively ('the doorbell one') and resolves it to the right file, instead of calling this with a path directly. Requires the user's explicit authorization first (see agent.confirm_authorized_action).",
+      "description": "Retransmits a Sub-GHz signal from its DECODED parameters: the firmware hands the protocol, bit-length and key to that protocol's encoder and keys the CC1101 transceiver to re-emit the signal on the given frequency. It takes parameters rather than a file path because the saved .sub files live on the desktop, not on the Flipper's SD card - the desktop reads the capture and sends its fields here. THIS TRANSMITS on the radio and can actuate the real device the signal belongs to (open a gate, trigger a relay), so it is only for testing one's own devices, never someone else's. Prefer the agent-layer agent.replay_subghz, which lets the user name a capture descriptively ('the doorbell one'), resolves it to the right capture and fills these parameters in from what was recorded, instead of calling this with raw fields. Requires the user's explicit authorization first (see agent.confirm_authorized_action).",
       "args": [
         {
-          "name": "file",
+          "name": "frequency",
+          "type": "integer",
+          "required": true,
+          "description": "the frequency to transmit on, in Hz, e.g. 433920000"
+        },
+        {
+          "name": "protocol",
           "type": "string",
           "required": true,
-          "description": "absolute path to the saved .sub file to transmit"
+          "description": "the decoded protocol name the encoder should use, e.g. Princeton, CAME, Nice_FloR_S"
+        },
+        {
+          "name": "bits",
+          "type": "integer",
+          "required": true,
+          "description": "the bit-length of the code, e.g. 24"
+        },
+        {
+          "name": "key",
+          "type": "string",
+          "required": true,
+          "description": "the code to send, as hex, e.g. 0x4E7B90"
         }
       ],
-      "returns": "transmission confirmation, echoing back the file that was replayed",
+      "returns": "transmission confirmation once the radio has finished keying the signal",
+      "status": "implemented"
+    },
+    {
+      "name": "subghz.read_raw",
+      "layer": "device",
+      "category": "subghz",
+      "impact": "passive",
+      "description": "Records the RAW radio timings on ONE frequency to a .sub file ON THE FLIPPER'S SD card, without decoding any protocol - the capture primitive for signals whose protocol the decoder does not know (a relay remote, an obscure fob). It tunes the CC1101 to the frequency, captures every RF edge for the window (5 seconds by default) straight to /ext/subghz/<name>.sub, and returns how many samples it recorded plus the name it saved under. Unlike subghz.read, it identifies nothing - it just stores the waveform - so it works for ANY signal and is far lighter on device memory. This is passive: it only receives. The <name> is chosen by the caller (the agent derives it from what the user said - 'a relay remote' becomes 'raw_relay_remote'), and that same name is later passed to subghz.send_raw to replay the capture. If almost nothing was on the air it returns 'no_signal' instead of saving a meaningless file.",
+      "args": [
+        {
+          "name": "frequency",
+          "type": "integer",
+          "required": true,
+          "description": "frequency in Hz, must fall in a CC1101 band (300-348, 387-464 or 779-928 MHz), e.g. 433920000"
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "required": true,
+          "description": "the filename stem to save under, derived from what the user said, e.g. 'raw_relay_remote'; only letters, digits, underscore and hyphen are kept"
+        },
+        {
+          "name": "timeout_ms",
+          "type": "integer",
+          "required": false,
+          "description": "how long it captures before stopping, 5000 (5 s) by default, 30000 at most"
+        }
+      ],
+      "returns": "'captured' followed by the sample count and the saved name, or 'no_signal' if the window passed with essentially nothing on the air",
+      "status": "implemented"
+    },
+    {
+      "name": "subghz.send_raw",
+      "layer": "device",
+      "category": "subghz",
+      "impact": "offensive",
+      "description": "Replays a RAW capture recorded by subghz.read_raw, by the <name> it was saved under. The .sub file lives on the Flipper's SD card, so unlike subghz.send this takes only the name - the firmware reads /ext/subghz/<name>.sub and keys the CC1101 to re-emit the recorded waveform on the frequency the file records, for up to 5 seconds. THIS TRANSMITS on the radio and can actuate the real device the signal belongs to (open a gate, trigger a relay), so it is only for testing one's own devices. Prefer the agent-layer agent.replay_raw, which names the capture the way the user refers to it and gates on authorization. Requires the user's explicit authorization first (see agent.confirm_authorized_action).",
+      "args": [
+        {
+          "name": "name",
+          "type": "string",
+          "required": true,
+          "description": "the saved capture name to replay, e.g. 'raw_relay_remote'"
+        }
+      ],
+      "returns": "transmission confirmation once the radio has finished replaying the capture",
       "status": "implemented"
     },
     {
@@ -978,7 +1042,7 @@
       "name": "agent.run_script",
       "layer": "agent",
       "category": "agent",
-      "description": "Writes and runs a SHORT, TEMPORARY Python script for one situation that no single catalog command covers - custom logic combining several device operations: polling a frequency until a value settles or a signal appears, chaining a handful of reads under a condition, timing a sequence, retrying until something happens, or computing a result across several readings. Use this whenever you judge that a small piece of custom logic is the right tool and no dedicated command (subghz.rssi, agent.listen, agent.watch_subghz, agent.check_frequency_activity, the IR tools) already does the job; prefer a dedicated command when one fits, and reach for a script only for the case it does not. The script runs in a locked-down sandbox: a separate Python process with a hard time limit, given ONLY a small set of harmless stdlib modules (time, math, json, random, statistics) and one object, `flipper`, whose single method flipper.request(command, *args) sends a device command and returns the usual {'status','data'} result dict. The script has NO access to the filesystem, the network, os or subprocess - it can compute and it can talk to the Flipper, nothing else. Write to stdout with print(): whatever the script prints is returned to you as its output, alongside the list of every device command it actually ran (check your conclusions against those, never against the printed text alone). A device command that TRANSMITS (subghz.replay, ir.send, nfc.emulate, offensive wifi/ble) is just as offensive when a script sends it as when you call it directly: run the authorization gate (agent.confirm_authorized_action) BEFORE running any script that transmits, and keep scripts passive unless the user has authorized otherwise. The script cannot run forever: it is killed at its time limit and reported as timed out, so keep the logic bounded.",
+      "description": "Writes and runs a SHORT, TEMPORARY Python script for one situation that no single catalog command covers - custom logic combining several device operations: polling a frequency until a value settles or a signal appears, chaining a handful of reads under a condition, timing a sequence, retrying until something happens, or computing a result across several readings. Use this whenever you judge that a small piece of custom logic is the right tool and no dedicated command (subghz.rssi, agent.listen, agent.watch_subghz, agent.check_frequency_activity, the IR tools) already does the job; prefer a dedicated command when one fits, and reach for a script only for the case it does not. The script runs in a locked-down sandbox: a separate Python process with a hard time limit, given ONLY a small set of harmless stdlib modules (time, math, json, random, statistics) and one object, `flipper`, whose single method flipper.request(command, *args) sends a device command and returns the usual {'status','data'} result dict. The script has NO access to the filesystem, the network, os or subprocess - it can compute and it can talk to the Flipper, nothing else. Write to stdout with print(): whatever the script prints is returned to you as its output, alongside the list of every device command it actually ran (check your conclusions against those, never against the printed text alone). A device command that TRANSMITS (subghz.send, ir.send, nfc.emulate, offensive wifi/ble) is just as offensive when a script sends it as when you call it directly: run the authorization gate (agent.confirm_authorized_action) BEFORE running any script that transmits, and keep scripts passive unless the user has authorized otherwise. The script cannot run forever: it is killed at its time limit and reported as timed out, so keep the logic bounded.",
       "uses": [],
       "args": [
         {
@@ -1008,9 +1072,9 @@
       "layer": "agent",
       "category": "agent",
       "impact": "offensive",
-      "description": "Retransmits a Sub-GHz signal previously harvested and saved by agent.listen, named the way the user refers to it ('replay the doorbell one', 'send the relay signal') rather than by file path. It looks the capture up in the apps_assets folder by a substring of its descriptive name, resolves it to the exact .sub file, and sends the device-layer subghz.replay to re-emit it. If the name matches no capture, or matches several, it says so and lists the candidates instead of guessing - replaying the wrong signal is exactly the mistake to avoid. THIS IS AN OFFENSIVE, TRANSMITTING action: it keys the radio and can actuate the real device the signal belongs to (open a gate, ring a doorbell, trip a relay). Send it ONLY after the user has explicitly confirmed they own the device or are authorized to test it (see agent.confirm_authorized_action). Use agent.listen first to capture and save the signal; use list_subghz-style listing (or just tell the user) to see what is available to replay.",
+      "description": "Retransmits a Sub-GHz signal previously harvested and saved by agent.listen, named the way the user refers to it ('replay the doorbell one', 'send the relay signal') rather than by file path. It looks the capture up in the apps_assets folder by a substring of its descriptive name, resolves it to the exact capture, reads back its decoded frequency/protocol/bits/key, and sends the device-layer subghz.send to re-emit it. If the name matches no capture, or matches several, it says so and lists the candidates instead of guessing - replaying the wrong signal is exactly the mistake to avoid. THIS IS AN OFFENSIVE, TRANSMITTING action: it keys the radio and can actuate the real device the signal belongs to (open a gate, ring a doorbell, trip a relay). Send it ONLY after the user has explicitly confirmed they own the device or are authorized to test it (see agent.confirm_authorized_action). Use agent.listen first to capture and save the signal; use list_subghz-style listing (or just tell the user) to see what is available to replay.",
       "uses": [
-        "subghz.replay"
+        "subghz.send"
       ],
       "args": [
         {
@@ -1021,6 +1085,58 @@
         }
       ],
       "returns": "confirmation of which saved capture was replayed and from which file, or an error listing the available captures if the name was ambiguous or unknown",
+      "status": "implemented"
+    },
+    {
+      "name": "agent.capture_raw",
+      "layer": "agent",
+      "category": "agent",
+      "impact": "passive",
+      "description": "Captures a Sub-GHz signal as a RAW waveform and saves it on the Flipper under a name derived from what the user said, then reports that name and STOPS - it does not replay. This is the command for 'I'm about to play/trigger a signal, record it' when the goal is to replay it later rather than to identify its protocol: a relay remote, a garage fob, any signal whose protocol may be unknown. Derive a short descriptive name from the user's words ('a relay remote' -> 'raw_relay_remote', 'the garage fob' -> 'raw_garage_fob') and pass it as name; the capture is written to /ext/subghz/<name>.sub on the device and recorded so it can be listed and replayed later. After capturing, tell the user the exact saved name and that they can replay it by saying 'play <name>'. Passive: it only records, it transmits nothing. Defaults: 433.92 MHz if no frequency is given, a 5-second window if no time is given. Use agent.replay_raw - not this - to play a capture back.",
+      "uses": [
+        "subghz.read_raw"
+      ],
+      "args": [
+        {
+          "name": "name",
+          "type": "string",
+          "required": true,
+          "description": "a short descriptive filename stem derived from what the user said, e.g. 'raw_relay_remote'"
+        },
+        {
+          "name": "frequency",
+          "type": "integer",
+          "required": false,
+          "description": "frequency in Hz to capture on; 433920000 by default"
+        },
+        {
+          "name": "time",
+          "type": "integer",
+          "required": false,
+          "description": "how many seconds to capture for; 5 by default"
+        }
+      ],
+      "returns": "the exact name the capture was saved under and the number of samples recorded, so the user can replay it later by that name; or a note that nothing was heard in the window",
+      "status": "implemented"
+    },
+    {
+      "name": "agent.replay_raw",
+      "layer": "agent",
+      "category": "agent",
+      "impact": "offensive",
+      "description": "Replays a RAW capture recorded by agent.capture_raw, named the way the user refers to it ('play raw_relay_remote', 'replay the relay one'). It resolves the name against the recorded raw captures - by exact name or an unambiguous substring - and sends the device-layer subghz.send_raw to re-emit the waveform the Flipper has stored. If the name matches no capture, or several, it says so and lists the candidates rather than guessing. THIS IS AN OFFENSIVE, TRANSMITTING action: it keys the radio and can actuate the real device the signal belongs to (open a gate, trip a relay). Send it ONLY after the user has explicitly confirmed they own the device or are authorized to test it (see agent.confirm_authorized_action). Use agent.capture_raw first to record the signal.",
+      "uses": [
+        "subghz.send_raw"
+      ],
+      "args": [
+        {
+          "name": "name",
+          "type": "string",
+          "required": true,
+          "description": "the raw capture to replay, as its saved name or an unambiguous substring, e.g. 'raw_relay_remote' or 'relay'"
+        }
+      ],
+      "returns": "confirmation of which raw capture was replayed, or an error listing the available raw captures if the name was ambiguous or unknown",
       "status": "implemented"
     },
     {
@@ -1278,10 +1394,12 @@
       "name": "agent.confirm_authorized_action",
       "layer": "agent",
       "category": "agent",
-      "description": "A mandatory safety gate before any device command that transmits/acts upon the real world (subghz.replay and its agent wrapper agent.replay_subghz, nfc.emulate, ir.send, and every offensive Wi-Fi/BLE command: wifi.attack_*, wifi.evil_portal, wifi.karma, ble.spam_*): the agent explicitly asks the user to confirm that they own the target or are authorized to test it, before sending the command. It executes nothing by itself, it only validates the intent.",
+      "description": "A mandatory safety gate before any device command that transmits/acts upon the real world (subghz.send and its agent wrapper agent.replay_subghz, subghz.send_raw and its agent wrapper agent.replay_raw, nfc.emulate, ir.send, and every offensive Wi-Fi/BLE command: wifi.attack_*, wifi.evil_portal, wifi.karma, ble.spam_*): the agent explicitly asks the user to confirm that they own the target or are authorized to test it, before sending the command. It executes nothing by itself, it only validates the intent.",
       "uses": [
-        "subghz.replay",
+        "subghz.send",
         "agent.replay_subghz",
+        "subghz.send_raw",
+        "agent.replay_raw",
         "nfc.emulate",
         "ir.send",
         "wifi.attack_deauth",

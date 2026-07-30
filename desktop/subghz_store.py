@@ -71,9 +71,9 @@ def _sub_file_text(frequency_hz, protocol, key, bits):
     """The body of a Flipper .sub file, in the format the firmware's RAW/BinRAW loader reads.
 
     A real .sub also carries a Preset and, for a decoded protocol, the protocol/bit/key
-    triple. This writes exactly that: enough for subghz.replay to reconstruct and re-send the
-    signal on a device the user owns. It is deliberately the stock Flipper format so the file
-    is usable by the plain Sub-GHz app too, not only by this project.
+    triple. This writes exactly that: enough for replay to reconstruct the signal (the desktop
+    reads these fields back and sends them as subghz.send) and for the stock Sub-GHz app to load
+    the file directly. It is deliberately the stock Flipper format, not something private.
     """
     return (
         "Filetype: Flipper SubGhz Key File\n"
@@ -152,6 +152,28 @@ class SubGhzStore:
         captures.sort(key=lambda m: m.get("captured_at", 0), reverse=True)
         return captures
 
+    def params(self, stem):
+        """The decoded transmit parameters of a saved capture, read from its JSON sidecar.
+
+        Replay no longer ships a file path to the firmware (the .sub lives here on the desktop,
+        not on the Flipper): it sends the decoded frequency/protocol/bits/key, which is exactly
+        what the sidecar stored at capture time. Returns that dict, or None if the sidecar is
+        missing or unreadable.
+        """
+        meta_file = self.meta_path(stem)
+        if not meta_file.exists():
+            return None
+        try:
+            meta = json.loads(meta_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return None
+        return {
+            "frequency": meta.get("frequency"),
+            "protocol": meta.get("protocol"),
+            "bits": meta.get("bits") or 0,
+            "key": meta.get("key"),
+        }
+
     def resolve(self, name):
         """The .sub path for a capture named by its stem, a substring of it, or a filename.
 
@@ -177,3 +199,74 @@ class SubGhzStore:
             )
         stem = matches[0]
         return stem, self.sub_path(stem)
+
+    # --- Raw captures -------------------------------------------------------
+    #
+    # A raw capture is different from a decoded one: the .sub waveform lives on the FLIPPER'S
+    # SD card (subghz.read_raw writes /ext/subghz/<name>.sub on the device), not here, because
+    # it is too large to ship over CFP. So the desktop keeps only a small name-level record per
+    # raw capture - enough to LIST what was captured and to RESOLVE a name the user speaks
+    # ('play the relay one') back to the exact device-side name for subghz.send_raw. The record
+    # is a JSON file under a raw/ subfolder, kept apart from the decoded .sub/.json pairs.
+
+    def _raw_root(self):
+        return self.root / "raw"
+
+    def raw_meta_path(self, name):
+        return self._raw_root() / f"{name}.json"
+
+    def save_raw(self, *, name, frequency, samples=None, guess=None):
+        """Record one raw capture the device saved under <name>. Stores no waveform - just the
+        name and context - since the .sub itself lives on the Flipper. Returns the record."""
+        self._raw_root().mkdir(parents=True, exist_ok=True)
+        record = {
+            "name": name,
+            "frequency": int(frequency) if frequency is not None else None,
+            "samples": int(samples) if samples else None,
+            "guess": guess,
+            "captured_at": time.time(),
+            "device_path": f"/ext/subghz/{name}.sub",
+            "raw": True,
+        }
+        self.raw_meta_path(name).write_text(
+            json.dumps(record, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        return record
+
+    def list_raw(self):
+        """Every recorded raw capture, newest first."""
+        root = self._raw_root()
+        if not root.exists():
+            return []
+        records = []
+        for meta_file in root.glob("*.json"):
+            try:
+                records.append(json.loads(meta_file.read_text(encoding="utf-8")))
+            except (json.JSONDecodeError, OSError):
+                continue
+        records.sort(key=lambda m: m.get("captured_at", 0), reverse=True)
+        return records
+
+    def resolve_raw(self, name):
+        """The device-side name for a raw capture referred to by its name or a substring of it.
+
+        Same strict discipline as resolve(): returns the single unambiguous match, or raises
+        LookupError listing the candidates when nothing or several match - replaying the wrong
+        signal is exactly the mistake to avoid. Returns the exact <name> to pass to
+        subghz.send_raw."""
+        wanted = (name or "").strip().lower()
+        if not wanted:
+            raise LookupError("no capture name was given")
+        wanted = wanted[:-4] if wanted.endswith(".sub") else wanted
+
+        names = [r["name"] for r in self.list_raw() if r.get("name")]
+        exact = [n for n in names if n.lower() == wanted]
+        matches = exact or [n for n in names if wanted in n.lower()]
+        if not matches:
+            available = ", ".join(names) or "(none saved)"
+            raise LookupError(f"no saved raw capture matches '{name}'. Available: {available}")
+        if len(matches) > 1:
+            raise LookupError(
+                f"'{name}' matches several raw captures ({', '.join(matches)}); be more specific"
+            )
+        return matches[0]
