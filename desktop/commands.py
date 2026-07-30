@@ -256,6 +256,21 @@ class CommandDispatcher:
         if command["name"] == "agent.replay_subghz":
             return self._replay_subghz(call_args)
 
+        if command["name"] == "agent.run_script":
+            from scripting import run_script
+
+            # The script reaches the device only through dispatch_device (this same
+            # dispatcher), so it is logged, simulated-marked and confined to device commands
+            # exactly like a subagent. No progress callback is wired here: _on_progress is
+            # the IR bruteforce's (sent, total) reporter, a different shape, and the script's
+            # per-command evidence already tells the model what it did.
+            return run_script(
+                call_args.get("code", ""),
+                self,
+                purpose=call_args.get("purpose", ""),
+                timeout=call_args.get("timeout"),
+            )
+
         if command["name"] in ("agent.build_flipper_app", "agent.edit_flipper_app"):
             from app_builder import AppBuilder
 

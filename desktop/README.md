@@ -107,14 +107,18 @@ The first is long work. Measuring one frequency is a single command, but establi
 
 The second is research over material already gathered. Every command the session has executed on the device is recorded in a log, and questions about it ("what have we measured so far?", "which commands failed?") need no hardware access at all, only reading.
 
-So the agent can delegate. A subagent is a separate conversation with the model: its own system instruction, its own tool list, its own round budget. It carries out one bounded task and reports back to the agent that summoned it. Two exist:
+So the agent can delegate. A subagent is a separate conversation with the model: its own system instruction, its own tool list, its own round budget. It carries out one bounded task and reports back to the agent that summoned it. Several exist:
 
 | Subagent | Role | Tools |
 |---|---|---|
 | scanner | measures the radio spectrum over several successive readings | `ping`, `info`, `subghz.rssi` |
+| listener | harvests every distinct Sub-GHz signal on a frequency across a window | `ping`, `info`, `subghz.rssi`, `subghz.read` + save/list skills |
+| watcher | waits on a frequency for a bounded window and reports the first signal that arrives | `ping`, `info`, `subghz.rssi`, `subghz.read` |
 | analyst | researches the session log | none |
 
 The analyst having no tools at all is deliberate, not an omission. A subagent that can only read cannot disturb the radio, and it cannot be the source of a fabricated measurement either: everything it says has to be traceable to a line of the log it was given.
+
+The listener and the watcher look alike - both read Sub-GHz over a window - but their intent is opposite, and that is why they are two specialists rather than one. The listener surveys what is ALREADY on a busy band and harvests the whole list, saving each distinct device; it is the answer to "what is transmitting here?". The watcher WAITS for a signal that has not been sent yet and reacts to the first one, stopping the instant it hears it; it is the answer to "a signal is about to be played, catch it". A watcher that kept reading to build a list, or a listener that stopped at the first code, would each be doing the other's job badly.
 
 Delegation is described in `commands.json` like everything else, under `"layer": "agent"`, with a `subagent` field naming the specialist and a `task` field phrasing the job in words. The catalog therefore remains the single source of truth: adding a delegated capability means describing it there, not changing the agent's code.
 
@@ -163,6 +167,14 @@ Subagents run one at a time, deliberately. Running them in parallel would buy li
 ## Building Flipper apps
 
 The agent can build actual native Flipper Zero applications on request ("build me a simple paint app"). This is not a single model writing some C and hoping: three separate agents debate it — a proposer that researches the task and writes the source, a challenger that argues against the design, and an arbiter that keeps only what survives the argument — after which the result is compiled with `ufbt` and, if a device is attached, installed. Compiler errors are fed back into the debate to be fixed, the generated source is saved and stays editable ("add a bigger brush to the paint app"), and the whole debate appears nested in the reasoning chain. It reports the real compiler result and never claims an app built or installed unless the toolchain confirmed it. This is implemented in `app_builder.py`, `app_store.py` and `ufbt_runner.py`, and documented in full in [/APP_BUILDER.md](../APP_BUILDER.md).
+
+## Temporary scripts
+
+The catalog commands cover the operations the project anticipated, and the subagents cover the recurring shapes of long work (harvest a band, wait for a signal, survey Wi-Fi). But an agent driving a device keeps meeting one-off cases no single command captures: poll a frequency until a value settles, chain a few reads under a condition, time a sequence, retry until something happens, compute a figure across several readings. Rather than grow a new catalog entry for each, the agent can write a **short Python script for exactly the case in front of it** and run it once, through `agent_run_script`. The watcher subagent above is the pre-built answer to one such case ("a signal is about to be played"); `agent_run_script` is the general tool for the cases there is no specialist for.
+
+Letting a model run code it wrote is the most dangerous thing the system could do, so it rests on two walls. The script runs in a **separate Python process**, started in isolated mode (`-I`) with a hard wall-clock timeout the parent enforces by killing the child — a script that loops forever cannot hang the application, it is stopped and reported as timed out. And inside that process the script reaches **almost nothing**: a restricted builtins map (no `open`, `eval`, `exec`, `compile`, `input`), an allowlist of harmless stdlib modules (`time`, `math`, `json`, `random`, `statistics`) enforced by a guarded `__import__`, and one capability that matters — a `flipper` object whose single method `request()` is the only way out of the sandbox. No filesystem, no network, no `os`, no `subprocess`.
+
+Crucially, the child process holds no device connection. Each `flipper.request()` is marshalled back over the pipe to the **parent**, executed there through the same `CommandDispatcher.dispatch_device` a subagent uses — so it is logged, marked when simulated, and confined to device-layer commands (a script can no more summon a subagent or transmit an un-authorized command than a subagent can) — and only the result crosses back. The parent stays the sole holder of the one door to the hardware. The result handed to the model carries the script's printed output *and* the recorded list of every device command it ran, so the model checks the script's claims against the real readings exactly as it does a subagent's evidence, never against the printed text alone. A transmitting command sent from a script is still offensive, and the model is instructed to run the authorization gate before any script that transmits. This lives in `scripting.py`.
 
 ## The graphical interface
 
@@ -231,6 +243,7 @@ It can also be used as a module, which is how `agent.py` obtains its client:
 | app_builder.py | the app builder: the three-way proposer/challenger/arbiter debate that writes, compiles and installs a Flipper app |
 | app_store.py | the persistent, editable store of generated apps (source, manifest, build history) |
 | ufbt_runner.py | the compile/install wrapper around ufbt, run as a subprocess so real compiler output can be captured |
+| scripting.py | the sandboxed runner for the agent's temporary scripts: a locked-down subprocess with device access but no filesystem, network or shell |
 | merge.py | the synthesiser that merges the results of several parallel chats into one |
 | memory.py | the agent's persistent memory: durable facts kept across sessions on disk |
 | commands.py | conversion of the commands.json catalog into Gemini tools, and dispatching of calls |

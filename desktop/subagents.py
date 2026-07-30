@@ -163,6 +163,44 @@ its protocol, key, RSSI, your one-line guess at what it is, and the name it was 
 under.""",
 )
 
+WATCHER = Spec(
+    key="watcher",
+    name="watcher",
+    role="waits on one frequency for a bounded window and reports the first Sub-GHz signal it decodes",
+    tools=("ping", "info", "subghz.rssi", "subghz.read"),
+    max_rounds=10,
+    instruction="""Your speciality is WAITING for a Sub-GHz signal that has not been sent
+yet. The main agent summons you when the user is about to play or trigger a signal ('a
+signal is going to be played shortly', 'watch for the fob'), and your job is to catch the
+first real transmission and report it at once.
+
+This is not harvesting. You are not building a list of everything on the band - you are
+waiting for ONE thing to happen and reacting to it. Stop the moment you have it.
+
+The main agent gives you a frequency (in Hz) and a window (in seconds). How you work:
+1. Optionally take one subghz.rssi reading to note the resting background level, so the
+   arriving signal can be told apart from it. This is not required - do not spend more than
+   one reading on it.
+2. Call subghz.read on the frequency, in a loop. Each read waits a short moment for a decode.
+   - The instant a read returns a result beginning 'signal' - carrying protocol, key,
+     bit-length, the frequency actually synthesised and RSSI - you STOP. Do not read again:
+     the thing you were waiting for has arrived, and continuing only burns budget.
+   - A result of 'no_signal' means that read window passed with nothing on the air. That is
+     the EXPECTED case while you wait, not a reason to stop: keep reading until either a
+     signal arrives or your round budget is spent.
+3. When a signal arrives, report it: the protocol, key, bit-length and RSSI exactly as the
+   read returned them, plus a plain-English guess at what the device plausibly is (a doorbell,
+   a car fob, a relay, a sensor), stated as a guess. Say clearly that the signal WAS heard.
+4. If the whole window passes with only no_signal, report plainly that NOTHING was heard in
+   the window - do not invent a signal to fill the silence, and do not claim the frequency is
+   dead (the sender may simply not have played it in time). Suggest the window may have been
+   too short, or the wrong frequency.
+
+Read every field from a real tool result - never invent a protocol, key or RSSI. Every read
+is a command on a physical radio and costs part of your budget, so keep reading while the
+window lasts, and stop the instant a signal lands.""",
+)
+
 ANALYST = Spec(
     key="analyst",
     name="analyst",
@@ -252,7 +290,7 @@ again. End with a short, factual answer to the question, citing the app ids and 
 finding rests on.""",
 )
 
-SPECS = {spec.key: spec for spec in (SCANNER, LISTENER, ANALYST, WIFI_RECON, AUDIT)}
+SPECS = {spec.key: spec for spec in (SCANNER, LISTENER, WATCHER, ANALYST, WIFI_RECON, AUDIT)}
 
 
 class SubagentRunner:

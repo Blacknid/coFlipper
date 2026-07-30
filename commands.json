@@ -933,6 +933,64 @@
       "status": "implemented"
     },
     {
+      "name": "agent.watch_subghz",
+      "layer": "agent",
+      "category": "agent",
+      "subagent": "watcher",
+      "impact": "passive",
+      "description": "Delegates to the watcher subagent the WAITING for a Sub-GHz signal that has not been sent yet, over a bounded window, and reports the FIRST real transmission it catches. This is the command for the situation where the user announces that a signal is about to be played or triggered - 'a Sub-GHz signal is going to be played shortly, listen for it', 'I'm about to press the fob, watch 433.92', 'catch the next signal on this frequency'. The watcher polls subghz.read in a loop across the window and stops the instant a signal is decoded, reporting its protocol, key, bit-length and RSSI plus a guess at the source device; if the whole window passes with nothing on the air, it reports plainly that nothing was heard rather than inventing a signal. This differs from the other Sub-GHz commands by intent: subghz.rssi is one instantaneous level; agent.check_frequency_activity decides whether anything is transmitting NOW; agent.listen harvests the LIST of everything already transmitting across a full window; agent.watch_subghz WAITS for a single upcoming signal and reacts to it. The watcher is PASSIVE: it only receives, it transmits nothing. It takes up to the window's length and costs several requests. If no frequency is given it defaults to 433.92 MHz; if no time is given it watches for 15 seconds.",
+      "uses": [
+        "subghz.rssi",
+        "subghz.read"
+      ],
+      "task": "Wait on the given frequency for the given number of seconds and report the FIRST Sub-GHz signal that arrives. Optionally take one subghz.rssi reading to note the resting background level; then call subghz.read in a loop across the window. A no_signal result is the expected case while waiting - keep reading. The instant a read returns a 'signal' result, STOP and report it: its protocol, key, bit-length and RSSI exactly as returned, plus a plain-English guess at what the device is (a doorbell, a car fob, a relay, a sensor), stated as a guess, and say clearly the signal WAS heard. If the whole window passes with only no_signal, report plainly that nothing was heard in the window - do not invent a signal, and do not claim the frequency is dead. If no frequency was given, use 433.92 MHz; if no time was given, watch for 15 seconds.",
+      "args": [
+        {
+          "name": "frequency",
+          "type": "integer",
+          "required": false,
+          "description": "the frequency to watch, in Hz, e.g. 433920000; defaults to 433.92 MHz if omitted"
+        },
+        {
+          "name": "time",
+          "type": "integer",
+          "required": false,
+          "description": "how long to wait for the signal, in seconds; the subagent turns this into a number of successive reads. 15 by default"
+        }
+      ],
+      "returns": "the first Sub-GHz signal caught in the window - its protocol, key, bit-length, RSSI and a guess at the source device - or a plain statement that nothing was heard in the window; plus the raw reads behind it",
+      "status": "implemented"
+    },
+    {
+      "name": "agent.run_script",
+      "layer": "agent",
+      "category": "agent",
+      "description": "Writes and runs a SHORT, TEMPORARY Python script for one situation that no single catalog command covers - custom logic combining several device operations: polling a frequency until a value settles or a signal appears, chaining a handful of reads under a condition, timing a sequence, retrying until something happens, or computing a result across several readings. Use this whenever you judge that a small piece of custom logic is the right tool and no dedicated command (subghz.rssi, agent.listen, agent.watch_subghz, agent.check_frequency_activity, the IR tools) already does the job; prefer a dedicated command when one fits, and reach for a script only for the case it does not. The script runs in a locked-down sandbox: a separate Python process with a hard time limit, given ONLY a small set of harmless stdlib modules (time, math, json, random, statistics) and one object, `flipper`, whose single method flipper.request(command, *args) sends a device command and returns the usual {'status','data'} result dict. The script has NO access to the filesystem, the network, os or subprocess - it can compute and it can talk to the Flipper, nothing else. Write to stdout with print(): whatever the script prints is returned to you as its output, alongside the list of every device command it actually ran (check your conclusions against those, never against the printed text alone). A device command that TRANSMITS (subghz.replay, ir.send, nfc.emulate, offensive wifi/ble) is just as offensive when a script sends it as when you call it directly: run the authorization gate (agent.confirm_authorized_action) BEFORE running any script that transmits, and keep scripts passive unless the user has authorized otherwise. The script cannot run forever: it is killed at its time limit and reported as timed out, so keep the logic bounded.",
+      "uses": [],
+      "args": [
+        {
+          "name": "purpose",
+          "type": "string",
+          "required": true,
+          "description": "one short line on what this script is for, e.g. 'poll 433.92 MHz until a signal is decoded or 15 s pass'"
+        },
+        {
+          "name": "code",
+          "type": "string",
+          "required": true,
+          "description": "the Python source to run. Talk to the device with flipper.request('subghz.read', 433920000) and read result['status']/result['data']; print() what you want returned. Only time, math, json, random and statistics may be imported."
+        },
+        {
+          "name": "timeout",
+          "type": "integer",
+          "required": false,
+          "description": "wall-clock limit in seconds before the script is killed; 20 by default, 60 at most"
+        }
+      ],
+      "returns": "the script's printed output, the list of device commands it ran with their real results, and whether it was stopped for exceeding its time limit",
+      "status": "implemented"
+    },
+    {
       "name": "agent.replay_subghz",
       "layer": "agent",
       "category": "agent",
