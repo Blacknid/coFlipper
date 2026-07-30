@@ -132,6 +132,27 @@ _BLE_FIXTURES = (
     ("E4:5F:01:77:88:05", "AirTag", -66),
 )
 
+# A fixed, fictitious set of NFC tags nfc.read hands out, one per read, cycling through the
+# list. Deterministic on purpose, exactly like the Sub-GHz and Wi-Fi fixtures: a read that
+# returned a different card each run could not be tested or demonstrated reproducibly.
+#
+# Each tuple is the RAW technical read the Flipper's NFC frontend produces - what the chip
+# announces about itself - and NOTHING about what the card is FOR: the type, the UID, and the
+# ISO14443 anticollision bytes (ATQA/SAK) or the ISO15693 marker. Deducing the likely USE (a
+# hotel key, a transit pass, a bank card, an amiibo) and looking the tag up online is the
+# agent's job, not the reader's - so the simulator hands over only the facts the hardware sees
+# and leaves the interpretation to the nfc_identify subagent. The UIDs are obviously invented
+# so no real card is implied; nothing here is emulated, and every result reaches the model
+# marked 'simulated'. Fields: type, UID, ATQA, SAK, protocol, storage in bytes.
+_NFC_FIXTURES = (
+    ("Mifare Classic 1K", "04:A1:B2:C3", "0004", "08", "ISO14443-3A", 1024),
+    ("NTAG215", "04:5F:2A:9C:71:80:00", "0044", "00", "ISO14443-3A", 504),
+    ("Mifare DESFire EV1", "04:7C:11:E2:52:31:80", "0344", "20", "ISO14443-4", 4096),
+    ("EMV bank card", "08:3D:9F:6A", "0004", "20", "ISO14443-4", 0),
+    ("Mifare Ultralight", "04:E1:22:5B:63:41:80", "0044", "00", "ISO14443-3A", 64),
+    ("ISO15693", "E0:04:01:50:8A:2B:3C:4D", "----", "--", "ISO15693", 256),
+)
+
 # Offensive/active operations always answer with an authorisation reminder appended, so the
 # marking that they disrupt real devices reaches the model even if it skipped the catalog.
 _BLE_SPAM = {
@@ -448,6 +469,87 @@ class MarauderSim:
         return self._ble_spam("ble.spam_airtag")
 
 
+class NfcSim:
+    """A minimal NFC front-end, enough to exercise the whole identification feature.
+
+    It reports what the real Flipper's NFC reader reports when a tag is presented - the chip
+    type, the UID, and the ISO14443 anticollision bytes - and holds a cursor so successive
+    reads walk the fixture list, the way tapping several different cards would. Everything it
+    returns is fictitious and, like all mock output, reaches the model marked 'simulated';
+    nothing here reads or emulates a real card.
+
+    Deliberately, it returns only the raw technical read and no interpretation: the type comes
+    from the hardware, but 'what the card is used for' and any online detail are worked out by
+    the nfc_identify subagent, never handed to it pre-chewed.
+    """
+
+    def __init__(self):
+        self._cursor = 0
+        self.nfc_op = None
+
+    @staticmethod
+    def _read_tokens(fixture):
+        card_type, uid, atqa, sak, protocol, storage = fixture
+        # 'key=value' tokens so the fields are self-describing on the wire, and a UID with an
+        # unusual length or a missing ATQA (ISO15693 has none) cannot be misread positionally.
+        tokens = [
+            f"type={card_type}",
+            f"uid={uid}",
+            f"atqa={atqa}",
+            f"sak={sak}",
+            f"protocol={protocol}",
+            f"bytes={storage}",
+        ]
+        return tokens
+
+    def handle(self, cmd, args):
+        if cmd == "nfc.read":
+            return self._read(args)
+        if cmd == "nfc.watch":
+            return self._watch(args)
+        if cmd == "nfc.emulate":
+            return self._emulate(args)
+        if cmd == "nfc.stop":
+            stopped = self.nfc_op or "nothing"
+            self.nfc_op = None
+            return ["stopped", stopped]
+        # An nfc.* name the simulator does not implement is treated as the firmware would.
+        raise CFPError("unknown_command")
+
+    def _read(self, args):
+        """One tag, the next in the fixture list, wrapping round.
+
+        A real read waits for a card and times out with 'no_card' if none arrives; the
+        simulator always has a card to present (the demo/test taps one), so it returns the
+        current fixture and advances the cursor, so a second read shows a different card
+        rather than the same one forever.
+        """
+        fixture = _NFC_FIXTURES[self._cursor % len(_NFC_FIXTURES)]
+        self._cursor += 1
+        return self._read_tokens(fixture)
+
+    def _watch(self, args):
+        """A short monitoring session: the tags seen, in order, with a relative timestamp.
+
+        Each entry is 'ms;type;uid', so agent.nfc_session_summary can count distinct cards
+        and spot a repeat. The first tag is shown twice, at two moments, to stand in for the
+        common case of one card tapped against a reader more than once.
+        """
+        order = (0, 1, 0)
+        return [
+            f"{(i + 1) * 800};{_NFC_FIXTURES[k][0]};{_NFC_FIXTURES[k][1]}"
+            for i, k in enumerate(order)
+        ]
+
+    def _emulate(self, args):
+        """Emulate a saved card. Offensive: on real hardware the Flipper answers a reader as
+        if it were that card, so the reminder is appended exactly as the radio attacks do."""
+        if not args:
+            raise CFPError("missing_name")
+        self.nfc_op = "emulate"
+        return ["emulating", str(args[0]), "authorized_use_only"]
+
+
 class MockCFPClient:
     # A marking read by CommandDispatcher and passed on to the model with every result,
     # so that it cannot present simulated data as real measurements.
@@ -464,6 +566,8 @@ class MockCFPClient:
         self._read_cursor = {}
         # Serves every wifi.*/ble.* command, holding the same state the real board would.
         self._marauder = MarauderSim()
+        # Serves the nfc.* commands, walking a fixture list of tags across successive reads.
+        self._nfc = NfcSim()
         # IR bruteforce state, mirroring CfpIrState in the firmware.
         self._ir_queue = []
         self._ir_sent = 0
@@ -547,8 +651,13 @@ class MockCFPClient:
         # real board would carry across commands.
         if cmd.startswith(("wifi.", "ble.")) or cmd == "marauder.reboot":
             return self._marauder.handle(cmd, args)
+        # Stubs first, so nfc.info still answers 'not_implemented' rather than being routed
+        # into the NFC simulator, which knows only the working nfc.* commands.
         if cmd in STUBS:
             raise CFPError("not_implemented")
+        # The NFC front-end has its own simulator, holding the read cursor across taps.
+        if cmd.startswith("nfc."):
+            return self._nfc.handle(cmd, args)
         raise CFPError("unknown_command")
 
     def _subghz_rssi(self, args):

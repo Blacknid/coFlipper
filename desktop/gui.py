@@ -27,11 +27,13 @@ Running it:
 import argparse
 import ctypes
 import os
+import mimetypes
 import queue
 import sys
 import threading
 import time
 import tkinter as tk
+from tkinter import filedialog
 from tkinter import font as tkfont
 from tkinter import ttk
 
@@ -49,7 +51,7 @@ from agent import (
 )
 from commands import CommandDispatcher, load_catalog, model_commands
 from memory import MemoryStore
-from reasoning import ANSWER, REPORT, REQUEST, SPAWN, THOUGHT, TOOL, plain_text
+from reasoning import ANSWER, REPORT, REQUEST, SEARCH, SPAWN, THOUGHT, TOOL, plain_text
 from settings import Settings
 from subagents import SubagentRunner
 import voice
@@ -84,6 +86,21 @@ ERR_RED_DARK = "#C25858"
 # turn in progress - the same suggestive, text-free composer control Claude uses.
 SEND_GLYPH = "↑"
 STOP_GLYPH = "■"
+
+# qFlipper's signature grid, drawn faintly behind the device card, and a slightly lifted
+# surface used for button hover so controls react to the pointer instead of sitting inert.
+GRID_LINE = "#232429"
+HOVER_BG = "#26272C"
+GRID_STEP = 15  # pixels between grid lines
+
+
+def _blend(base, target, t):
+    """A colour t of the way from base to target (both '#rrggbb'), for smooth pulsing/fading.
+    t is clamped to 0..1; t=0 returns base, t=1 returns target."""
+    t = max(0.0, min(1.0, t))
+    b = (int(base[1:3], 16), int(base[3:5], 16), int(base[5:7], 16))
+    g = (int(target[1:3], 16), int(target[3:5], 16), int(target[5:7], 16))
+    return "#%02x%02x%02x" % tuple(round(b[i] + (g[i] - b[i]) * t) for i in range(3))
 
 # How often the presence of the device is checked. Checking means no more than reading
 # the list of serial ports, so a short interval does not load the system.
@@ -179,6 +196,10 @@ class ChatSession:
         # button's "recording…" label while the user is speaking.
         self._recorder = None
         self._mic_tick_pending = False
+        # A file picked but not yet sent: it waits here (shown as a chip) so the user can add
+        # instructions or send it alone. {bytes, mime_type, name}, or None when nothing is
+        # attached. Voice is not staged this way - push-to-talk sends as soon as it stops.
+        self._pending_attachment = None
         # The last answer and the commands behind it, kept for the merge.
         self.last_answer = None
         self.last_commands = []
@@ -239,11 +260,28 @@ class ChatSession:
         bar.grid(row=2, column=0, sticky="ew")
         bar.columnconfigure(0, weight=1)
 
-        wrapper = tk.Frame(bar, bg=BG_PANEL, highlightthickness=1, highlightbackground=BORDER)
-        wrapper.grid(row=0, column=0, sticky="ew", padx=(0, 12))
+        # A chip shown above the composer while a file is attached but not yet sent: it names
+        # the file and offers an ✕ to drop it. Hidden (grid_remove) until a file is staged.
+        self.attach_chip = tk.Frame(bar, bg=BG_CARD, highlightthickness=1, highlightbackground=BORDER)
+        self.attach_chip_label = tk.Label(
+            self.attach_chip, text="", bg=BG_CARD, fg=WEB_BLUE, font=self.window.font_small
+        )
+        self.attach_chip_label.pack(side="left", padx=(10, 6), pady=4)
+        tk.Button(
+            self.attach_chip, text="✕", command=self._clear_attachment, bg=BG_CARD, fg=FG_DIM,
+            font=self.window.font_small, relief="flat", padx=6, pady=0, cursor="hand2",
+            activebackground=BG_CARD, activeforeground=ERR_RED, borderwidth=0, highlightthickness=0,
+        ).pack(side="left", padx=(0, 8))
+        self.attach_chip.grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
+        self.attach_chip.grid_remove()
+
+        self.input_wrapper = tk.Frame(
+            bar, bg=BG_PANEL, highlightthickness=1, highlightbackground=BORDER
+        )
+        self.input_wrapper.grid(row=1, column=0, sticky="ew", padx=(0, 12))
 
         self.entry = tk.Entry(
-            wrapper,
+            self.input_wrapper,
             bg=BG_PANEL,
             fg=FG,
             font=self.window.font_body,
@@ -256,29 +294,46 @@ class ChatSession:
         )
         self.entry.pack(fill="x", padx=14, pady=11)
         self.entry.bind("<Return>", lambda _event: self.on_send())
+        # The composer glows orange while it has focus, the way qFlipper's active fields do.
+        self.entry.bind(
+            "<FocusIn>", lambda _e: self.input_wrapper.configure(highlightbackground=ORANGE)
+        )
+        self.entry.bind(
+            "<FocusOut>", lambda _e: self.input_wrapper.configure(highlightbackground=BORDER)
+        )
 
-        # Voice input: a push-to-talk button, offered only when a microphone is actually
-        # usable (the library and a device are present). The spoken message is sent as audio;
-        # the model hears and transcribes it in the same turn.
-        if voice.is_available():
-            self.mic_button = tk.Button(
-                bar,
-                text="🎤",
-                command=self.on_mic,
-                bg=BG_CARD,
-                fg=FG,
-                font=self.window.font_bold,
-                relief="flat",
-                padx=16,
-                pady=10,
-                activebackground=BORDER,
-                cursor="hand2",
-                borderwidth=0,
-                highlightthickness=0,
-            )
-            self.mic_button.grid(row=0, column=1, padx=(0, 8))
-        else:
-            self.mic_button = None
+        # Attach control: a single, text-free "+" that opens a small menu to choose what to
+        # attach - a spoken message or a file (image, PDF, ...). Minimal, in Claude's style. It
+        # is always present (files need no microphone); the voice option appears only when a mic
+        # is actually usable. While recording, this same button becomes the stop control.
+        self.attach_button = tk.Button(
+            bar,
+            text="＋",
+            command=self._on_attach,
+            bg=BG_CARD,
+            fg=FG,
+            font=self.window.font_bold,
+            relief="flat",
+            padx=16,
+            pady=10,
+            activebackground=BORDER,
+            cursor="hand2",
+            borderwidth=0,
+            highlightthickness=0,
+            width=2,
+        )
+        self.attach_button.grid(row=1, column=1, padx=(0, 8))
+        # Hover feedback, but only in its idle "+" role - not while it is the red stop control.
+        self.attach_button.bind(
+            "<Enter>",
+            lambda _e: self.attach_button.configure(bg=HOVER_BG)
+            if not (self._recorder and self._recorder.recording) else None,
+        )
+        self.attach_button.bind(
+            "<Leave>",
+            lambda _e: self.attach_button.configure(bg=BG_CARD)
+            if not (self._recorder and self._recorder.recording) else None,
+        )
 
         # One text-free button that doubles as send and stop: an up-arrow to send, a square to
         # stop the turn in progress (like Claude's composer). It routes through one handler that
@@ -301,7 +356,7 @@ class ChatSession:
             highlightthickness=0,
             width=2,
         )
-        self.send_button.grid(row=0, column=2)
+        self.send_button.grid(row=1, column=2)
         self.send_button.bind("<Enter>", lambda _e: self._hover_send(True))
         self.send_button.bind("<Leave>", lambda _e: self._hover_send(False))
 
@@ -341,10 +396,10 @@ class ChatSession:
         # The send/stop button is managed by _refresh_send_button, not here: while the chat
         # works, the composer is disabled but that button stays live as the stop control.
         self._refresh_send_button()
-        # The mic is disabled while a turn runs too - unless a recording is in progress, whose
-        # own Stop must stay clickable so the user can finish speaking.
-        if self.mic_button is not None and not (self._recorder and self._recorder.recording):
-            self.mic_button.configure(state=state)
+        # The attach button is disabled while a turn runs too - unless a recording is in
+        # progress, whose own Stop must stay clickable so the user can finish speaking.
+        if not (self._recorder and self._recorder.recording):
+            self.attach_button.configure(state=state)
         if enabled:
             self.entry.focus_set()
 
@@ -358,16 +413,42 @@ class ChatSession:
         self.set_local_status("se oprește...", WARN_YELLOW)
         self.send_button.configure(state="disabled")
 
-    def on_mic(self):
-        """Push-to-talk: first click starts recording, second click stops and sends.
-
-        The spoken message travels as audio; the model transcribes and acts on it in the same
-        turn. Recording runs on the SDK's callback thread, so the interface stays live and a
-        timer can tick the button's label up while the user speaks."""
-        if self.busy and not (self._recorder and self._recorder.recording):
-            return
+    def _on_attach(self):
+        """The composer's attach control. While recording it stops and sends; otherwise it
+        opens a small menu to pick what to attach - a spoken message or a file. Minimal, in
+        Claude's style: one button, no separate category on the bar."""
         if self._recorder and self._recorder.recording:
             self._stop_recording_and_send()
+            return
+        if self.busy:
+            return
+        menu = tk.Menu(
+            self.frame,
+            tearoff=0,
+            bg=BG_CARD,
+            fg=FG,
+            activebackground=ORANGE,
+            activeforeground="#141518",
+            bd=0,
+            relief="flat",
+            font=self.window.font_small,
+        )
+        # Voice is offered only when a microphone is actually usable; a file always is.
+        if voice.is_available():
+            menu.add_command(label="  🎤   Mesaj vocal  ", command=self._start_recording)
+        menu.add_command(label="  📎   Fișier  ", command=self._pick_file)
+        self.attach_button.update_idletasks()
+        x = self.attach_button.winfo_rootx()
+        y = self.attach_button.winfo_rooty()
+        try:
+            menu.tk_popup(x, y)
+        finally:
+            menu.grab_release()
+
+    def _start_recording(self):
+        """Begins a push-to-talk voice message. The spoken audio is transcribed and acted on by
+        the model in the same turn; the button becomes a stop that ends and sends it."""
+        if self.busy:
             return
         try:
             self._recorder = voice.Recorder()
@@ -376,12 +457,55 @@ class ChatSession:
             self._recorder = None
             self.set_local_status(f"microfonul nu a putut porni: {exc}", ERR_RED)
             return
-        # Block the text path while recording, but keep the mic (now a Stop button) live.
+        # Block the text path while recording, but keep the attach button (now a Stop) live.
         self.entry.configure(state="disabled")
         self.send_button.configure(state="disabled", bg=BG_CARD)
-        self.mic_button.configure(text="⏹", bg=ERR_RED, fg="#141518")
+        self.attach_button.configure(text="⏹", bg=ERR_RED, fg="#141518")
         self._mic_tick_pending = True
         self._update_mic_label()
+
+    def _pick_file(self):
+        """Attaches a file (image, PDF, audio, text, ...) but does NOT send it. The file waits
+        as a chip so the user can add instructions and then send, or send it alone to have the
+        model analyse it. It reaches the model as an inline part on the next send."""
+        if self.busy:
+            return
+        path = filedialog.askopenfilename(
+            parent=self.window.root,
+            title="Alege un fișier",
+            filetypes=[
+                ("Imagini", "*.png *.jpg *.jpeg *.webp *.gif *.bmp"),
+                ("PDF", "*.pdf"),
+                ("Audio", "*.wav *.mp3 *.m4a *.ogg *.flac"),
+                ("Text", "*.txt *.md *.csv *.json"),
+                ("Toate fișierele", "*.*"),
+            ],
+        )
+        if not path:
+            return
+        try:
+            with open(path, "rb") as handle:
+                data = handle.read()
+        except OSError as exc:
+            self.set_local_status(f"nu am putut citi fișierul: {exc}", ERR_RED)
+            return
+        if not data:
+            self.set_local_status("fișierul este gol", FG_DIM)
+            return
+        mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
+        name = os.path.basename(path)
+        # Stage it: shown as a chip, sent only when the user presses send (with or without text).
+        self._pending_attachment = {"bytes": data, "mime_type": mime, "name": name}
+        self.attach_chip_label.configure(text=f"📎 {name}")
+        self.attach_chip.grid()
+        self.set_local_status("fișier atașat — scrie instrucțiuni (opțional), apoi trimite", WEB_BLUE)
+        self.entry.focus_set()
+
+    def _clear_attachment(self):
+        """Drops the staged file without sending it."""
+        self._pending_attachment = None
+        self.attach_chip.grid_remove()
+        self.attach_chip_label.configure(text="")
 
     def _update_mic_label(self):
         if not (self._recorder and self._recorder.recording):
@@ -397,7 +521,7 @@ class ChatSession:
         # Length from the WAV payload (44-byte header, 2 bytes/sample, 16 kHz mono) - the
         # recorder's own duration is 0 now that stop() has cleared its frames.
         seconds = max(0.0, (len(wav) - 44) / (voice.SAMPLE_RATE * voice.SAMPLE_WIDTH))
-        self.mic_button.configure(text="🎤", bg=BG_CARD, fg=FG)
+        self.attach_button.configure(text="＋", bg=BG_CARD, fg=FG)
         if len(wav) <= 44:  # nothing captured
             self.set_local_status("nu am înregistrat nimic", FG_DIM)
             self.set_input_enabled(True)
@@ -531,6 +655,24 @@ class ChatSession:
                     self._append(self.chain, f"{pad}{STEP_INDENT}↗ {url}\n", "visit")
             self._append(self.chain, "\n")
             self.set_local_status(f"execută {step.name}...", ORANGE)
+        elif step.kind == SEARCH:
+            # A web search the model ran itself: the queries it issued, then the sources it
+            # read, styled like the visited-URL rows so a web-backed answer is transparent.
+            self._append(self.chain, "căutare web\n", "call")
+            if step.queries:
+                qline = "   ".join(f"„{q}”" for q in step.queries)
+                self._append(self.chain, f"{pad}{STEP_INDENT}{qline}\n", "dim")
+            for src in step.sources:
+                # Google returns an ugly redirect URI; the clean label is the domain or the
+                # site title. Prefer those, fall back to the URI only if neither is present.
+                domain, title, uri = src.get("domain"), src.get("title"), src.get("uri")
+                label = domain or title or uri
+                row = f"↗ {label}"
+                if domain and title and title != domain:
+                    row += f" — {title}"
+                self._append(self.chain, f"{pad}{STEP_INDENT}{row}\n", "visit")
+            self._append(self.chain, "\n")
+            self.set_local_status("a căutat pe web…", WEB_BLUE)
         elif step.kind == SPAWN:
             self._on_spawn(step)
         elif step.kind == REPORT:
@@ -715,10 +857,19 @@ class ChatSession:
         if self.busy:
             return
         message = self.entry.get().strip()
-        if not message:
+        att = self._pending_attachment
+        # Nothing to send unless there is text or a staged file. A staged file may go alone
+        # (analyse the photo) or with instructions.
+        if not message and not att:
             return
         self.entry.delete(0, "end")
-        self._send(message)
+        if att:
+            self._clear_attachment()
+            display = f"📎 {att['name']}" + (f" — {message}" if message else "")
+            self._send(message, attachment={"bytes": att["bytes"], "mime_type": att["mime_type"]},
+                       display=display)
+        else:
+            self._send(message)
 
     def _send(self, message, attachment=None, display=None):
         """Starts a turn, from typed text or a spoken (attachment) message.
@@ -821,6 +972,13 @@ class CoFlipperWindow:
         # The device-card status baseline, kept up to date by the monitor thread.
         self.ready_status = "se conecteaza..."
         self.ready_color = FG_DIM
+        # Animation state: a phase advanced on a slow timer, driving the breathing connection
+        # dot and the "working…" ellipsis, so the interface reads as alive rather than static.
+        # _pulse_base is the dot's current colour; it steadies (stops breathing) on an error.
+        self._anim_phase = 0.0
+        self._pulse_base = FG_FAINT
+        self._pulse_steady = False
+        self._activity_base = ""
 
         root.title("coFlipper")
         root.minsize(860, 520)
@@ -835,6 +993,7 @@ class CoFlipperWindow:
 
         root.after(100, self._drain_events)
         root.after(TYPE_INTERVAL_MS, self._type_tick)
+        root.after(90, self._anim_tick)
         # Connecting opens the serial port and reads the catalog, so it happens on a
         # separate thread: otherwise the window would look frozen until it finished.
         threading.Thread(target=self._connect, daemon=True).start()
@@ -868,20 +1027,38 @@ class CoFlipperWindow:
     def _build_styles(self):
         style = ttk.Style()
         style.theme_use("clam")
+        # A clean, thumb-only scrollbar. clam's default draws two arrow buttons at the ends -
+        # small dark squares that never light up on hover, which is exactly the "lines that
+        # stay dark" the eye catches. Redefining the layout without the arrows removes them, so
+        # only the thumb remains, and it brightens under the pointer.
+        style.layout(
+            "coFlipper.Vertical.TScrollbar",
+            [
+                (
+                    "Vertical.Scrollbar.trough",
+                    {
+                        "sticky": "ns",
+                        "children": [
+                            ("Vertical.Scrollbar.thumb", {"expand": "1", "sticky": "nswe"})
+                        ],
+                    },
+                )
+            ],
+        )
         style.configure(
             "coFlipper.Vertical.TScrollbar",
-            background=BORDER,
-            troughcolor=BG_PANEL,
+            background=BORDER,          # the thumb
+            troughcolor=BG_PANEL,       # the track it slides in
             bordercolor=BG_PANEL,
-            arrowcolor=FG_DIM,
-            darkcolor=BORDER,
+            darkcolor=BORDER,           # no bevel: match the thumb so there are no edge lines
             lightcolor=BORDER,
             relief="flat",
             width=10,
         )
         style.map(
             "coFlipper.Vertical.TScrollbar",
-            background=[("active", FG_FAINT), ("pressed", ORANGE)],
+            # The thumb lifts to a light gray on hover and to the orange accent while dragged.
+            background=[("pressed", ORANGE), ("active", FG_FAINT)],
         )
         # The tab strip, restyled for the dark theme: the system default is a light,
         # raised ribbon that clashes with everything else.
@@ -896,8 +1073,9 @@ class CoFlipperWindow:
         )
         style.map(
             "coFlipper.TNotebook.Tab",
-            background=[("selected", BG_PANEL)],
-            foreground=[("selected", ORANGE)],
+            # 'active' is the hovered state: the tab lifts and brightens under the pointer.
+            background=[("selected", BG_PANEL), ("active", HOVER_BG)],
+            foreground=[("selected", ORANGE), ("active", FG)],
         )
         # The model picker, restyled for the dark theme (clam's default combobox is a bright
         # white field). The dropdown list is a Tk option, not a ttk one, so it is set through
@@ -1007,6 +1185,18 @@ class CoFlipperWindow:
             highlightbackground=BORDER,
             highlightcolor=BORDER,
         )
+
+        # React to the pointer: lift the surface and brighten the border on hover, so the
+        # controls feel live rather than painted on. A disabled button stays inert.
+        def on_enter(_e):
+            if str(button["state"]) != "disabled":
+                button.configure(bg=HOVER_BG, highlightbackground=fg)
+
+        def on_leave(_e):
+            button.configure(bg=BG_CARD, highlightbackground=BORDER)
+
+        button.bind("<Enter>", on_enter)
+        button.bind("<Leave>", on_leave)
         return button
 
     def _set_controls_enabled(self, enabled):
@@ -1108,15 +1298,17 @@ class CoFlipperWindow:
         ).pack(side="right")
 
     def _build_device_card(self):
-        card = tk.Frame(
-            self.root, bg=BG_CARD, highlightthickness=1, highlightbackground=BORDER, padx=18, pady=14
+        # The device card is drawn on a canvas so qFlipper's faint grid can sit behind it. The
+        # content stays ordinary widgets placed on the canvas, so everything that refers to the
+        # status dot or the tools label keeps working unchanged.
+        self.card_canvas = tk.Canvas(
+            self.root, bg=BG_CARD, height=68, highlightthickness=1,
+            highlightbackground=BORDER, bd=0,
         )
-        card.grid(row=1, column=0, sticky="ew", padx=20)
-        card.columnconfigure(1, weight=1)
+        self.card_canvas.grid(row=1, column=0, sticky="ew", padx=20)
+        self.card_canvas.bind("<Configure>", self._draw_card_grid)
 
-        left = tk.Frame(card, bg=BG_CARD)
-        left.grid(row=0, column=0, sticky="w")
-
+        left = tk.Frame(self.card_canvas, bg=BG_CARD)
         tk.Label(left, text="Flipper Zero", bg=BG_CARD, fg=FG, font=self.font_device).pack(anchor="w")
 
         state_row = tk.Frame(left, bg=BG_CARD)
@@ -1128,8 +1320,7 @@ class CoFlipperWindow:
         )
         self.status_label.pack(side="left")
 
-        right = tk.Frame(card, bg=BG_CARD)
-        right.grid(row=0, column=1, sticky="e")
+        right = tk.Frame(self.card_canvas, bg=BG_CARD)
         tk.Label(
             right, text="UNELTE DISPONIBILE", bg=BG_CARD, fg=FG_FAINT, font=self.font_label
         ).pack(anchor="e")
@@ -1137,6 +1328,26 @@ class CoFlipperWindow:
             right, text="—", bg=BG_CARD, fg=FG_DIM, font=self.font_small, justify="right"
         )
         self.tools_label.pack(anchor="e", pady=(3, 0))
+
+        # Placed on the canvas; repositioned to the card's edges whenever it is resized.
+        self._card_left_win = self.card_canvas.create_window(18, 34, window=left, anchor="w")
+        self._card_right_win = self.card_canvas.create_window(0, 34, window=right, anchor="e")
+
+    def _draw_card_grid(self, _event=None, width=None, height=None):
+        """Repaints the faint grid behind the device card and pins the content to its edges.
+        width/height default to the canvas's real size; they are passed explicitly only by the
+        headless test, where an unmapped canvas reports no size of its own."""
+        canvas = self.card_canvas
+        canvas.delete("grid")
+        width = width or canvas.winfo_width()
+        height = height or canvas.winfo_height()
+        for x in range(0, width, GRID_STEP):
+            canvas.create_line(x, 0, x, height, fill=GRID_LINE, tags="grid")
+        for y in range(0, height, GRID_STEP):
+            canvas.create_line(0, y, width, y, fill=GRID_LINE, tags="grid")
+        canvas.tag_lower("grid")  # keep the grid behind the content windows
+        canvas.coords(self._card_left_win, 18, height // 2)
+        canvas.coords(self._card_right_win, width - 18, height // 2)
 
     def _build_notebook(self):
         holder = tk.Frame(self.root, bg=BG, padx=20)
@@ -1260,6 +1471,10 @@ class CoFlipperWindow:
     def _set_status(self, text, color=FG_DIM):
         self.status_label.configure(text=text, fg=color)
         self.status_dot.configure(fg=color)
+        # Feed the breathing dot: it pulses this colour, but stays steady on an error (red), so
+        # a fault reads as a fixed alarm rather than a friendly heartbeat.
+        self._pulse_base = color
+        self._pulse_steady = color == ERR_RED
 
     # ------------------------------------------------------------- session mgmt
 
@@ -1355,11 +1570,15 @@ class CoFlipperWindow:
         """The shared indicators that depend on how many chats exist or are working."""
         working = sum(1 for s in self.sessions if s.busy)
         if working == 0:
+            # Idle: a plain count, and the animated ellipsis is switched off.
+            self._activity_base = ""
             self.activity_label.configure(text=f"{len(self.sessions)} chaturi")
-        elif working == 1:
-            self.activity_label.configure(text="1 chat lucrează…")
         else:
-            self.activity_label.configure(text=f"{working} chaturi lucrează în paralel…")
+            # Working: the ellipsis is animated by _anim_tick, so only the stem is set here.
+            self._activity_base = (
+                "1 chat lucrează" if working == 1 else f"{working} chaturi lucrează în paralel"
+            )
+            self.activity_label.configure(text=self._activity_base)
         # Merge needs at least two answers and nothing still running.
         answered = sum(1 for s in self.sessions if s.last_answer)
         # Merge needs at least two answers, nothing running, no merge already in flight, and
@@ -1461,6 +1680,27 @@ class CoFlipperWindow:
         for session in self.sessions:
             session.type_step()
         self.root.after(TYPE_INTERVAL_MS, self._type_tick)
+
+    def _anim_tick(self):
+        """The slow heartbeat of the interface: it breathes the connection dot and animates the
+        'working…' ellipsis, so a connected, thinking app looks alive rather than frozen."""
+        import math
+
+        if self.closing:
+            return
+        self._anim_phase += 0.12
+        # The dot breathes between a dim and a full version of its status colour - unless it is
+        # steady (an error), which should read as a fixed alarm, not a pulse.
+        if self._pulse_steady:
+            self.status_dot.configure(fg=self._pulse_base)
+        else:
+            level = 0.45 + 0.55 * (0.5 + 0.5 * math.sin(self._anim_phase))
+            self.status_dot.configure(fg=_blend(BG_CARD, self._pulse_base, level))
+        # The activity label, when a chat is working, gets a moving ellipsis (…, .·°, etc.).
+        if self._activity_base:
+            dots = "." * (1 + int(self._anim_phase * 1.5) % 3)
+            self.activity_label.configure(text=self._activity_base + dots)
+        self.root.after(90, self._anim_tick)
 
     def _on_event_ready(self, payload):
         simulated = payload["simulated"]

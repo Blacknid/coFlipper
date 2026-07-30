@@ -311,7 +311,8 @@
       "name": "nfc.read",
       "layer": "device",
       "category": "nfc",
-      "description": "Waits for an NFC tag/card brought close to the Flipper and returns its UID and type.",
+      "impact": "passive",
+      "description": "Waits for an NFC tag/card brought close to the Flipper and returns the raw technical read the frontend produces: 'type=<chip>', 'uid=<hex>', 'atqa=<hex>', 'sak=<hex>', 'protocol=<ISO14443-3A/ISO14443-4/ISO15693>' and 'bytes=<storage>'. Passive: it only listens to what the card announces, it does not write or emulate. This is the reading step behind identifying a tag - what the card IS FOR (a hotel key, a transit pass, a bank card, an amiibo) is deduced afterwards from these fields, not returned here. Prefer delegating a full identification to the nfc_identify subagent (agent.identify_nfc) rather than interpreting the raw read yourself.",
       "args": [
         {
           "name": "timeout_ms",
@@ -320,14 +321,15 @@
           "description": "how long it waits for a card, 5000 by default"
         }
       ],
-      "returns": "UID, card type (Mifare, NTAG, etc.)",
-      "status": "planned"
+      "returns": "type, UID, ATQA, SAK, protocol and storage size, as self-describing key=value tokens",
+      "status": "implemented"
     },
     {
       "name": "nfc.watch",
       "layer": "device",
       "category": "nfc",
-      "description": "Monitors, over a period of time, all NFC tags/cards that come within range of the module.",
+      "impact": "passive",
+      "description": "Monitors, over a period of time, all NFC tags/cards that come within range of the module. Passive. Each event is one 'ms;type;uid' token, in chronological order, so a repeated card can be told from several distinct ones.",
       "args": [
         {
           "name": "duration_ms",
@@ -336,14 +338,15 @@
           "description": "monitoring duration in milliseconds"
         }
       ],
-      "returns": "a list of detected card UIDs/types, in chronological order, with timestamps",
-      "status": "planned"
+      "returns": "a list of detected cards as 'ms;type;uid' tokens, in chronological order",
+      "status": "implemented"
     },
     {
       "name": "nfc.emulate",
       "layer": "device",
       "category": "nfc",
-      "description": "Emulates a previously saved NFC card (the Flipper behaves like that card towards a reader).",
+      "impact": "offensive",
+      "description": "Emulates a previously saved NFC card: the Flipper answers a reader as if it were that card. Active impersonation - only against a card you own or are authorized to test, after explicit confirmation. Runs until stopped with nfc.stop.",
       "args": [
         {
           "name": "name",
@@ -353,7 +356,17 @@
         }
       ],
       "returns": "emulation start confirmation",
-      "status": "planned"
+      "status": "implemented"
+    },
+    {
+      "name": "nfc.stop",
+      "layer": "device",
+      "category": "nfc",
+      "impact": "passive",
+      "description": "Stops whatever NFC operation is running (a watch session or an emulation). Send it as soon as the goal is met, and always before starting a different NFC operation.",
+      "args": [],
+      "returns": "confirmation of what was stopped",
+      "status": "implemented"
     },
     {
       "name": "rfid.read",
@@ -1220,6 +1233,28 @@
       ],
       "returns": "a natural-language explanation + the confidence level of the identification",
       "status": "planned"
+    },
+    {
+      "name": "agent.identify_nfc",
+      "layer": "agent",
+      "category": "agent",
+      "subagent": "nfc_identify",
+      "description": "Delegates to the nfc_identify subagent the identification of an NFC tag a user has presented to the Flipper: it reads the tag (nfc.read), works out the chip type from the read, deduces what the tag is most plausibly USED FOR (a hotel/office access key, a public-transport pass, a contactless bank card, an amiibo or NFC sticker, an event wristband), and looks the tag up online for corroborating detail (what the chip is, its storage, common uses, security notes). Use this whenever the user asks 'what is this card/tag', 'read this tag and tell me what it is', or 'identify this NFC', instead of calling nfc.read yourself. The subagent is passive: it can read a tag but has NO nfc.emulate or any transmit tool, so it can never impersonate the card - emulation stays your decision, taken with the user, afterwards.",
+      "uses": [
+        "nfc.read",
+        "nfc.watch"
+      ],
+      "task": "Identify the NFC tag the user has presented. Read it with nfc.read, then from the read (type, UID, ATQA, SAK, protocol, storage) state the chip type, and deduce what the tag is most plausibly used for - an access/hotel key, a transit pass, a contactless bank card, an amiibo or NFC sticker, an event wristband - saying plainly it is an informed guess, not a certainty, and what in the read points to it. Search the web for the tag type for corroborating detail (what the chip is, its storage and memory layout, its common real-world uses and any security notes), and cite what you found. Do not emulate or write anything; you have no tool to do so. Report the type, the likely use, and the online detail behind it.",
+      "args": [
+        {
+          "name": "goal",
+          "type": "string",
+          "required": false,
+          "description": "any hint about the tag from the user, e.g. 'it's my office badge' or 'found this sticker on a poster'"
+        }
+      ],
+      "returns": "the chip type, a reasoned guess at what the tag is used for, and online detail with its sources",
+      "status": "implemented"
     },
     {
       "name": "agent.nfc_session_summary",

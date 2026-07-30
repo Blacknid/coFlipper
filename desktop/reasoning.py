@@ -24,6 +24,8 @@ THOUGHT = "thought"  # a summary of the reasoning, received from the model
 TOOL = "tool"  # a command actually executed on the device, with its result
 SPAWN = "spawn"  # a subagent is summoned: who it is, what it may do, what it was asked
 REPORT = "report"  # the findings a subagent hands back to the agent that summoned it
+SEARCH = "search"  # a web search the model ran itself (Google Search grounding): the queries
+# it issued and the sources it consulted, so an answer leaning on the web shows what it read
 ANSWER = "answer"  # the final answer, phrased on the basis of the preceding steps
 
 
@@ -65,6 +67,16 @@ class Step:
         device rather than browsing, so the only online access is the IR-code database
         consulted during an online IR search; those files show up here."""
         return list(self.outcome.get("visited") or [])
+
+    @property
+    def queries(self):
+        """For a SEARCH step: the web queries the model issued on its own."""
+        return list(self.meta.get("queries") or [])
+
+    @property
+    def sources(self):
+        """For a SEARCH step: the web sources it consulted, each {title, uri, domain}."""
+        return list(self.meta.get("sources") or [])
 
     def arg_line(self):
         return " ".join(f"{key}={value}" for key, value in self.args.items())
@@ -134,6 +146,19 @@ class Trace:
                 meta=dict(meta or {}),
                 depth=depth,
                 source=name,
+            )
+        )
+
+    def add_search(self, queries, sources, depth=0, source=""):
+        """A web search the model performed itself (Google Search grounding): the queries it
+        issued and the sources it consulted."""
+        return self._add(
+            Step(
+                kind=SEARCH,
+                name="web_search",
+                meta={"queries": list(queries or []), "sources": list(sources or [])},
+                depth=depth,
+                source=source,
             )
         )
 
