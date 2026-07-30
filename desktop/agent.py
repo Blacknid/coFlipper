@@ -1,12 +1,12 @@
-"""Agentul coFlipper: leaga modelul Gemini de dispozitivul Flipper Zero.
+"""The coFlipper agent: connects the Gemini model to the Flipper Zero device.
 
-Utilizatorul scrie in limbaj natural, modelul decide ce comenzi CFP sunt necesare,
-agentul le executa pe dispozitiv si returneaza modelului rezultatele reale, pe baza
-carora acesta formuleaza raspunsul final.
+The user writes in natural language, the model decides which CFP commands are needed,
+the agent executes them on the device and returns the real results to the model, on
+whose basis it formulates the final answer.
 
-Rulare:
-    python agent.py           # cu Flipper conectat prin USB
-    python agent.py --mock    # fara dispozitiv, pentru dezvoltare
+Running:
+    python agent.py           # with a Flipper connected over USB
+    python agent.py --mock    # without a device, for development
 """
 
 import argparse
@@ -20,39 +20,40 @@ from google.genai import errors, types
 
 from commands import CommandDispatcher, build_tool, device_commands, load_catalog
 
-# Model fixat intentionat, nu un alias de tip "latest": aliasul urmareste mereu cea mai
-# recenta generatie, iar aceasta vine cu alte limite de utilizare. Concret, aliasul
-# gemini-flash-latest trimitea catre gemini-3.6-flash, limitat la 20 de cereri pe zi pe
-# planul gratuit - insuficient pentru dezvoltare si demonstratie.
-# Poate fi schimbat fara modificarea codului, prin variabila de mediu COFLIPPER_MODEL.
+# The model is pinned deliberately, not via a "latest" alias: the alias always tracks the
+# most recent generation, and that generation comes with different usage limits. Concretely,
+# the gemini-flash-latest alias pointed to gemini-3.6-flash, limited to 20 requests per day
+# on the free plan - insufficient for development and demonstration.
+# It can be changed without modifying the code, through the COFLIPPER_MODEL env variable.
 MODEL = os.environ.get("COFLIPPER_MODEL", "gemini-3.5-flash")
 
-# API-ul returneaza ocazional 503 cand este suprasolicitat. Fara reincercare,
-# o astfel de eroare trecatoare ar intrerupe conversatia in curs.
+# The API occasionally returns 503 when overloaded. Without a retry, such a transient
+# error would interrupt the conversation in progress.
 SEND_RETRIES = 3
 RETRY_DELAY_S = 2.0
 
-SYSTEM_INSTRUCTION = """Ești asistentul proiectului coFlipper. Controlezi un dispozitiv
-Flipper Zero conectat prin USB, folosind uneltele care ți-au fost puse la dispoziție.
+SYSTEM_INSTRUCTION = """You are the assistant of the coFlipper project. You control a
+Flipper Zero device connected over USB, using the tools made available to you.
 
-Reguli pe care le respecți strict:
-1. Orice informație despre starea dispozitivului sau despre semnalele din jur provine
-   EXCLUSIV din rezultatul unei unelte apelate. Nu inventezi niciodată frecvențe,
-   UID-uri, protocoale sau citiri hardware.
-2. Dacă o unealtă răspunde cu eroare (de exemplu 'not_implemented'), spui deschis
-   utilizatorului că funcția respectivă nu este încă implementată pe dispozitiv.
-   Nu compensezi eroarea cu un răspuns plauzibil inventat.
-3. Poți explica noțiuni tehnice generale din cunoștințele tale, dar marchezi clar
-   diferența dintre explicație generală și date măsurate de dispozitiv.
-4. Raspunde in limba in care ai primit promptul.
+Rules you follow strictly:
+1. Any information about the state of the device or about the signals around it comes
+   EXCLUSIVELY from the result of a tool call. You never invent frequencies,
+   UIDs, protocols, or hardware readings.
+2. If a tool responds with an error (for example 'not_implemented'), you tell the user
+   openly that the feature in question is not yet implemented on the device.
+   You do not compensate for the error with a plausible, invented answer.
+3. You may explain general technical concepts from your own knowledge, but you clearly
+   mark the difference between a general explanation and data measured by the device.
+4. Reply in the language in which you received the prompt.
 """
 
 
 def build_client_for_device():
-    from cfp_client import pick_port
-    from protocol import CFPClient
+    # connect() also launches the CFP application on the device if it is not already
+    # open - without it running, the Flipper does not know the `cfp` command at all.
+    from cfp_client import connect
 
-    return CFPClient(pick_port())
+    return connect()
 
 
 def send_with_retry(chat, message):
@@ -62,27 +63,27 @@ def send_with_retry(chat, message):
         except errors.ServerError as exc:
             if attempt == SEND_RETRIES:
                 raise
-            print(f"  [gemini] serviciu indisponibil ({exc.code}), reincerc...")
+            print(f"  [gemini] service unavailable ({exc.code}), retrying...")
             time.sleep(RETRY_DELAY_S * attempt)
         except errors.ClientError as exc:
             if exc.code != 429:
                 raise
-            # Un 429 cu 'limit: 0' nu inseamna o cota consumata de noi, ci un model
-            # care nu este deloc disponibil pe planul curent: reincercarea e inutila.
+            # A 429 with 'limit: 0' does not mean a quota we consumed ourselves, but a
+            # model that is not available at all on the current plan: retrying is pointless.
             if "limit: 0" in str(exc):
                 sys.exit(
-                    f"Modelul {MODEL} nu este disponibil pe planul acestei chei API.\n"
-                    "Alege altul prin variabila de mediu COFLIPPER_MODEL "
-                    "(list_models.py arata ce exista)."
+                    f"The model {MODEL} is not available on this API key's plan.\n"
+                    "Choose another one through the COFLIPPER_MODEL environment variable "
+                    "(list_models.py shows what exists)."
                 )
             if attempt == SEND_RETRIES:
                 raise
-            print("  [gemini] limita de cereri atinsa, astept...")
+            print("  [gemini] request limit reached, waiting...")
             time.sleep(RETRY_DELAY_S * attempt * 5)
 
 
 def run_turn(chat, dispatcher, message):
-    """Un tur de conversatie: poate include mai multe runde de apeluri de unelte."""
+    """One conversation turn: may include several rounds of tool calls."""
     response = send_with_retry(chat, message)
 
     while response.function_calls:
@@ -100,29 +101,29 @@ def run_turn(chat, dispatcher, message):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Agentul coFlipper (Gemini + Flipper Zero)")
+    parser = argparse.ArgumentParser(description="The coFlipper agent (Gemini + Flipper Zero)")
     parser.add_argument(
         "--mock",
         action="store_true",
-        help="foloseste un Flipper simulat, fara dispozitiv fizic",
+        help="use a simulated Flipper, without a physical device",
     )
     args = parser.parse_args()
 
     load_dotenv()
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        sys.exit("GEMINI_API_KEY nu este setat. Pune-l in desktop/.env (vezi .env.example).")
+        sys.exit("GEMINI_API_KEY is not set. Put it in desktop/.env (see .env.example).")
 
     catalog = load_catalog()
     commands = device_commands(catalog)
     if not commands:
-        sys.exit("Nicio comanda disponibila in commands.json.")
+        sys.exit("No command available in commands.json.")
 
     if args.mock:
         from mock_flipper import MockCFPClient
 
         flipper = MockCFPClient()
-        print("Mod simulat: niciun dispozitiv fizic nu este folosit.")
+        print("Simulated mode: no physical device is used.")
     else:
         flipper = build_client_for_device()
 
@@ -137,8 +138,8 @@ def main():
     )
 
     names = ", ".join(cmd["name"] for cmd in commands)
-    print(f"Unelte disponibile modelului: {names}")
-    print("Scrie o cerere in limbaj natural. Ctrl+C pentru a incheia.\n")
+    print(f"Tools available to the model: {names}")
+    print("Write a request in natural language. Ctrl+C to finish.\n")
 
     try:
         while True:
@@ -147,7 +148,7 @@ def main():
                 continue
             print(run_turn(chat, dispatcher, message))
     except KeyboardInterrupt:
-        print("\nSesiunea a fost oprita.")
+        print("\nSession stopped.")
     finally:
         flipper.close()
 

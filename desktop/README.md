@@ -1,49 +1,77 @@
-# desktop/ — agentul coFlipper
+# desktop/ — the coFlipper agent
 
-Componenta care rulează pe calculator: interpretează cererile utilizatorului cu ajutorul modelului Gemini și le traduce în comenzi CFP trimise către Flipper Zero. Protocolul este documentat în [/PROTOCOL.md](../PROTOCOL.md), catalogul de comenzi în [/commands.json](../commands.json).
+The component that runs on the computer: it interprets user requests with the help of the Gemini model and translates them into CFP commands sent to the Flipper Zero. The protocol is documented in [/PROTOCOL.md](../PROTOCOL.md), the command catalog in [/commands.json](../commands.json).
 
-## Instalare
+## Installation
 
     pip install -r requirements.txt
 
-Apoi copiază `.env.example` în `.env` și completează cheia obținută de la [Google AI Studio](https://aistudio.google.com/apikey):
+Then copy `.env.example` to `.env` and fill in the key obtained from [Google AI Studio](https://aistudio.google.com/apikey):
 
-    GEMINI_API_KEY=cheia_ta
+    GEMINI_API_KEY=your_key
 
-Fișierul `.env` este exclus din git și nu trebuie publicat.
+The `.env` file is excluded from git and must not be published.
 
-### Alegerea modelului
+### Choosing the model
 
-Modelul este fixat explicit în `agent.py` și poate fi schimbat, fără modificarea codului, prin variabila de mediu `COFLIPPER_MODEL`. Am evitat intenționat aliasurile de tip `gemini-flash-latest`: acestea urmăresc mereu cea mai recentă generație, iar limitele de utilizare diferă substanțial de la o generație la alta.
+The model is set explicitly in `agent.py` and can be changed, without modifying the code, through the `COFLIPPER_MODEL` environment variable. We deliberately avoided aliases of the `gemini-flash-latest` kind: these always track the most recent generation, and usage limits differ substantially from one generation to the next.
 
-Constatare practică din timpul dezvoltării, pe planul gratuit: `gemini-flash-latest` trimitea către `gemini-3.6-flash`, limitat la 20 de cereri pe zi, insuficient pentru dezvoltare. Modelele `gemini-2.0-flash` și `gemini-2.5-flash` nu sunt deloc disponibile pentru chei API noi — primele răspund cu `limit: 0`, celelalte cu eroare 404. `list_models.py` afișează modelele accesibile cheii configurate.
+A practical finding from during development, on the free plan: `gemini-flash-latest` pointed to `gemini-3.6-flash`, limited to 20 requests per day, which was insufficient for development. The `gemini-2.0-flash` and `gemini-2.5-flash` models are not available at all for new API keys — the former respond with `limit: 0`, the latter with a 404 error. `list_models.py` shows the models accessible to the configured key.
 
-## Rulare
+## Running
 
-    python agent.py           # cu Flipper Zero conectat prin USB
-    python agent.py --mock    # fara dispozitiv fizic, pentru dezvoltare
+    python agent.py           # with a Flipper Zero connected over USB
+    python agent.py --mock    # without a physical device, for development
 
-În modul `--mock`, comenzile nu ajung la un dispozitiv real: sunt servite de un Flipper simulat care răspunde exact ca firmware-ul (`ping` și `info` reușesc, restul returnează `not_implemented`). Modul este util pentru a lucra pe partea de agent atunci când dispozitivul nu este la îndemână.
+In `--mock` mode, commands do not reach a real device: they are served by a simulated Flipper that responds exactly like the firmware (`ping` and `info` succeed, the rest return `not_implemented`). This mode is useful for working on the agent side when the device is not at hand.
 
-## Fișiere
+### Bringing up the connection
 
-| Fișier | Rol |
+Both the agent and the manual console go through `connect()` in `cfp_client.py`, which handles the two steps a CFP session needs:
+
+1. Finding the serial port, by USB VID/PID rather than by description (on Windows the Flipper shows up as a nondescript "USB Serial Device").
+2. Launching the coFlipper application on the device, if it is not already open.
+
+The second step matters more than it looks: the `cfp` command exists only while our application is running, because it is that application which registers the command into the Flipper's CLI. With it closed, every request fails with `could not find command cfp`. To launch it, the client briefly speaks the Flipper's *native* CLI (`loader info` to see what is open, `loader open` to start our application), then hands the port over to the CFP session proper.
+
+If the application is already open, it is detected and left alone. Use `--no-launch` to skip this step entirely and assume the application is running.
+
+Two device-side details worth knowing: `loader open` needs the full `.fap` path, since it resolves plain names only for built-in applications; and `loader close` does not work on our application, which exits only on a Back event — the `cfp <id> exit` command is what closes it remotely.
+
+### Manual console
+
+    python cfp_client.py                      # interactive, auto-detected port
+    python cfp_client.py --port COM12         # explicit port
+    python cfp_client.py -c "ping" -c "info"  # run commands and exit
+    python cfp_client.py --list-ports         # list serial ports and exit
+    python cfp_client.py --no-launch          # assume the application is already open
+
+It can also be used as a module, which is how `agent.py` obtains its client:
+
+    from cfp_client import connect
+
+    with connect() as flipper:
+        print(flipper.request("ping"))
+
+## Files
+
+| File | Role |
 |---|---|
-| agent.py | agentul propriu-zis: bucla de conversație și orchestrarea apelurilor de unelte |
-| commands.py | conversia catalogului commands.json în unelte Gemini și dispecerizarea apelurilor |
-| protocol.py | implementarea clientului CFP peste portul serial |
-| cfp_client.py | consolă pentru trimiterea manuală de comenzi CFP, fără model de limbaj |
-| mock_flipper.py | Flipper simulat, cu aceeași interfață ca clientul real |
-| test_gemini.py | verificare minimală a conexiunii la API-ul Gemini |
-| list_models.py | listează modelele disponibile pentru cheia configurată |
+| agent.py | the agent proper: the conversation loop and orchestration of tool calls |
+| commands.py | conversion of the commands.json catalog into Gemini tools, and dispatching of calls |
+| protocol.py | implementation of the CFP client over the serial port |
+| cfp_client.py | connection setup (port detection + launching the application) and a console for sending CFP commands manually, without a language model |
+| mock_flipper.py | a simulated Flipper, with the same interface as the real client |
+| test_gemini.py | a minimal check of the connection to the Gemini API |
+| list_models.py | lists the models available to the configured key |
 
-## Stadiul verificării
+## Verification status
 
-Bucla completă model → unealtă → comandă CFP → răspuns → formulare finală a fost testată cu API-ul Gemini real, atât în modul simulat, cât și pe un Flipper Zero fizic (firmware Momentum `mntm-012`, port serial USB).
+The full loop model → tool → CFP command → response → final phrasing has been tested against the real Gemini API, both in simulated mode and on a physical Flipper Zero (Momentum firmware `mntm-012`, USB serial port).
 
-Scenarii verificate pe dispozitivul fizic:
+Scenarios verified on the physical device:
 
-- interogarea stării dispozitivului (`ping`, `info`), cu apelarea a două unelte într-un singur tur de conversație;
-- măsurarea nivelului de semnal pe o frecvență indicată de utilizator, cu interpretarea valorii în limbaj natural;
-- compararea a două frecvențe, agentul decizând singur să efectueze două măsurători succesive și să formuleze o concluzie;
-- solicitarea unei frecvențe imposibile fizic (2.4 GHz), caz în care agentul a raportat eroarea returnată de dispozitiv și a explicat corect limitarea hardware, fără a inventa o măsurătoare.
+- querying device state (`ping`, `info`), with two tools called within a single conversation turn;
+- measuring the signal level on a frequency indicated by the user, with the value interpreted in natural language;
+- comparing two frequencies, with the agent deciding on its own to perform two successive measurements and formulate a conclusion;
+- requesting a physically impossible frequency (2.4 GHz), in which case the agent reported the error returned by the device and correctly explained the hardware limitation, without inventing a measurement.

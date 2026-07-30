@@ -1,7 +1,7 @@
-"""Puntea dintre catalogul de comenzi (commands.json) si uneltele expuse modelului Gemini.
+"""The bridge between the command catalog (commands.json) and the tools exposed to Gemini.
 
-Catalogul este singura sursa de adevar: o comanda noua se adauga acolo, iar modelul
-o primeste automat ca unealta apelabila, fara modificari in codul agentului.
+The catalog is the single source of truth: a new command is added there, and the model
+receives it automatically as a callable tool, with no changes to the agent's code.
 """
 
 import json
@@ -11,8 +11,8 @@ from google.genai import types
 
 CATALOG_PATH = pathlib.Path(__file__).resolve().parent.parent / "commands.json"
 
-# Comenzile marcate "planned" exista doar ca intentie de proiectare: firmware-ul
-# nu le cunoaste inca, deci nu au ce sa caute in lista de unelte a modelului.
+# Commands marked "planned" exist only as design intent: the firmware does not know
+# them yet, so they have no business being in the model's tool list.
 AVAILABLE_STATUSES = ("implemented", "stub")
 
 _JSON_TYPE_TO_SCHEMA = {
@@ -29,11 +29,11 @@ def load_catalog(path=CATALOG_PATH):
 
 
 def device_commands(catalog, statuses=AVAILABLE_STATUSES):
-    """Comenzile pe care modelul le poate apela.
+    """The commands the model is allowed to call.
 
-    Nu tot ce stie dispozitivul trebuie oferit modelului: comenzile marcate
-    'agent_visible': false sunt de uz intern (de exemplu inchiderea aplicatiei)
-    si nu au ce sa caute in lista lui de unelte.
+    Not everything the device knows should be offered to the model: commands marked
+    'agent_visible': false are for internal use (for example closing the application)
+    and have no business being in its tool list.
     """
     return [
         cmd
@@ -45,7 +45,7 @@ def device_commands(catalog, statuses=AVAILABLE_STATUSES):
 
 
 def tool_name(cfp_name):
-    """'subghz.info' -> 'subghz_info' (numele de functii Gemini nu contin puncte)."""
+    """'subghz.info' -> 'subghz_info' (Gemini function names cannot contain dots)."""
     return cfp_name.replace(".", "_")
 
 
@@ -72,7 +72,7 @@ def build_tool(commands):
     for command in commands:
         description = command["description"]
         if command.get("status") == "stub":
-            description += " (Atentie: momentan neimplementata in firmware, va raspunde ERR.)"
+            description += " (Warning: currently not implemented in firmware, will respond ERR.)"
         declarations.append(
             types.FunctionDeclaration(
                 name=tool_name(command["name"]),
@@ -84,7 +84,7 @@ def build_tool(commands):
 
 
 class CommandDispatcher:
-    """Traduce un apel de unealta primit de la model intr-o cerere CFP catre Flipper."""
+    """Translates a tool call received from the model into a CFP request to the Flipper."""
 
     def __init__(self, commands, client):
         self._by_tool_name = {tool_name(cmd["name"]): cmd for cmd in commands}
@@ -95,7 +95,7 @@ class CommandDispatcher:
         return list(self._by_tool_name.values())
 
     def _positional_args(self, command, call_args):
-        # CFP v1 transmite argumentele pozitional, in ordinea din catalog.
+        # CFP v1 passes arguments positionally, in the order given in the catalog.
         values = []
         for arg in command.get("args") or []:
             if arg["name"] in call_args:
@@ -103,14 +103,14 @@ class CommandDispatcher:
         return values
 
     def dispatch(self, name, call_args):
-        """Returneaza un dict, forma pe care Gemini o asteapta ca raspuns de unealta."""
+        """Returns a dict, the shape Gemini expects as a tool response."""
         command = self._by_tool_name.get(name)
         if command is None:
-            return {"status": "error", "error": f"comanda necunoscuta: {name}"}
+            return {"status": "error", "error": f"unknown command: {name}"}
 
         args = self._positional_args(command, call_args or {})
         try:
             data = self._client.request(command["name"], *args)
-        except Exception as exc:  # eroare de protocol sau de port serial
+        except Exception as exc:  # protocol error or serial port error
             return {"status": "error", "error": str(exc)}
         return {"status": "ok", "data": data}

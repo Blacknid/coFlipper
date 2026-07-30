@@ -1,37 +1,41 @@
-# flipper/ — server CFP pentru Flipper Zero
+# flipper/ — CFP server for the Flipper Zero
 
-Aplicație FAP care rulează pe Flipper Zero și înregistrează comanda CLI `cfp`, folosită de componenta desktop pentru comunicare prin Protocolul coFlipper (CFP). Protocolul este documentat în [/PROTOCOL.md](../PROTOCOL.md).
+A FAP application that runs on the Flipper Zero and registers the `cfp` CLI command, used by the desktop component to communicate over the coFlipper Protocol (CFP). The protocol is documented in [/PROTOCOL.md](../PROTOCOL.md).
 
-## Build și rulare
+## Build and run
 
-Necesită [ufbt](https://github.com/flipperdevices/flipperzero-ufbt) (Micro Flipper Build Tool):
+Requires [ufbt](https://github.com/flipperdevices/flipperzero-ufbt) (Micro Flipper Build Tool):
 
     pip install ufbt
     cd flipper
     ufbt launch
 
-`ufbt launch` compilează aplicația, o trimite pe Flipper conectat prin USB și o pornește. Pentru a doar compila, fără flash: `ufbt build`.
+`ufbt launch` compiles the application, sends it to the Flipper connected over USB, and starts it. To only compile, without flashing: `ufbt build`.
 
-Dispozitivul folosit în dezvoltare rulează firmware Momentum, nu firmware-ul oficial. Deoarece o aplicație externă trebuie compilată cu SDK-ul corespunzător versiunii de firmware pe care va rula, `ufbt` a fost configurat să folosească indexul Momentum:
+The device used in development runs Momentum firmware, not the official firmware. Since an external application must be compiled with the SDK matching the firmware version it will run on, `ufbt` was configured to use the Momentum index:
 
     ufbt update -c release --index-url=https://up.momentum-fw.dev/firmware/directory.json
 
-Verificarea potrivirii se face comparând valorile `Target` și `API` raportate la finalul compilării cu cele raportate de dispozitiv la comanda `device_info` (în cazul nostru, target 7 și API 87.1).
+Checking that they match is done by comparing the `Target` and `API` values reported at the end of the build with those reported by the device for the `device_info` command (in our case, target 7 and API 87.1).
 
-## Testare
+## Testing
 
-Cu aplicația pornită pe Flipper (ecranul arată „coFlipper - CFP"), dispozitivul răspunde la comenzi trimise pe portul serial CLI — același port folosit și de qFlipper. Din desktop:
+With the application running on the Flipper (the screen shows "coFlipper - CFP"), the device responds to commands sent over the CLI serial port — the same port used by qFlipper. From the desktop:
 
     python ../desktop/cfp_client.py
 
-## Stadiul verificării
+The application does not have to be started by hand: `cfp_client.py` checks whether it is open and launches it over the native CLI (`loader open`) if it is not. Details in [/desktop/README.md](../desktop/README.md).
 
-Aplicația a fost compilată, instalată și testată pe un Flipper Zero fizic. Comenzile `ping` și `info` returnează date reale ale dispozitivului, iar comenzile încă neimplementate (`subghz.info`, `ir.info`, `nfc.info`) răspund, conform proiectării, cu `ERR not_implemented`. O comandă inexistentă produce `ERR unknown_command`.
+Note that `loader close` has no effect on this application — the loader reports that it "has to be closed manually", because the event loop in `cfp_app.c` exits only on a Back event. Closing it remotely is what the `cfp <id> exit` command is for, which injects exactly that event.
 
-## Două observații utile pentru dezvoltarea ulterioară
+## Verification status
 
-Ambele au fost descoperite în urma testării pe dispozitivul fizic și merită reținute, întrucât nu sunt evidente din documentație:
+The application has been compiled, installed, and tested on a physical Flipper Zero. The `ping` and `info` commands return real device data, and the commands not yet implemented (`subghz.info`, `ir.info`, `nfc.info`) respond, by design, with `ERR not_implemented`. A nonexistent command produces `ERR unknown_command`.
 
-1. Interfața CLI a Flipper Zero interpretează caracterul `\r` drept confirmare a comenzii. O linie terminată doar cu `\n` este primită, dar nu este niciodată executată — comportament care se manifestă ca o expirare a timpului de așteptare, fără niciun mesaj de eroare.
+## Two observations useful for further development
 
-2. O comandă înregistrată cu `CliCommandFlagDefault` este refuzată atât timp cât o aplicație este deschisă pe dispozitiv, cu mesajul `this command cannot be run while an application is open`. Întrucât în arhitectura noastră chiar aplicația care înregistrează comanda rămâne deschisă pe ecran, comanda trebuie declarată cu `CliCommandFlagParallelSafe`, altfel devine inutilizabilă.
+Both were discovered while testing on the physical device and are worth keeping in mind, since they are not obvious from the documentation:
+
+1. The Flipper Zero CLI interprets the `\r` character as command confirmation. A line terminated only with `\n` is received but never executed — behavior that manifests as a wait timeout, with no error message.
+
+2. A command registered with `CliCommandFlagDefault` is refused as long as an application is open on the device, with the message `this command cannot be run while an application is open`. Since in our architecture it is precisely the application registering the command that stays open on screen, the command must be declared with `CliCommandFlagParallelSafe`, otherwise it becomes unusable.

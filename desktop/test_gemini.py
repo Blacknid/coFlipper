@@ -8,7 +8,7 @@ load_dotenv()
 
 api_key = os.environ.get("GEMINI_API_KEY")
 if not api_key:
-    sys.exit("GEMINI_API_KEY nu este setat. Pune-l in desktop/.env (vezi .env.example).")
+    sys.exit("GEMINI_API_KEY is not set. Put it in desktop/.env (see .env.example).")
 
 client = genai.Client(api_key=api_key)
 
@@ -23,4 +23,4 @@ try:
         )
         print(response.text)
 except KeyboardInterrupt:
-    print("\nSesiunea a fost oprita.")
+    print("\nSession stopped.")

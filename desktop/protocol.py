@@ -1,4 +1,4 @@
-"""Client Python pentru Protocolul coFlipper (CFP), vezi /PROTOCOL.md."""
+"""Python client for the coFlipper Protocol (CFP), see /PROTOCOL.md."""
 
 import itertools
 import time
@@ -17,7 +17,7 @@ class CFPError(Exception):
 
 
 def encode_frame(request_id, cmd, args):
-    # CLI-ul Flipper trateaza \r drept Enter; \n singur nu submite comanda.
+    # The Flipper CLI treats \r as Enter; \n alone does not submit the command.
     tokens = ["cfp", str(request_id), cmd, *args]
     return (" ".join(tokens) + "\r\n").encode("ascii")
 
@@ -43,8 +43,8 @@ class CFPClient:
     def __init__(self, port, baudrate=DEFAULT_BAUDRATE, timeout=DEFAULT_TIMEOUT):
         self._serial = serial.Serial(port, baudrate=baudrate, timeout=timeout)
         self._ids = itertools.count(1)
-        # CLI-ul Flipper afiseaza un banner/prompt la conectare; un Enter gol
-        # il aduce intr-o stare stabila, iar bufferul e golit inainte de prima cerere.
+        # The Flipper CLI prints a banner/prompt on connect; an empty Enter brings it
+        # into a stable state, and the buffer is flushed before the first request.
         self._serial.write(b"\r\n")
         time.sleep(0.3)
         self._serial.reset_input_buffer()
@@ -64,10 +64,10 @@ class CFPClient:
         while True:
             line = self._serial.readline()
             if not line:
-                raise CFPError(f"timeout: niciun raspuns la '{cmd}'")
+                raise CFPError(f"timeout: no response to '{cmd}'")
             reply = decode_frame(line)
             if reply is None or reply["id"] != request_id:
                 continue
             if reply["status"] == "ERR":
-                raise CFPError(" ".join(reply["data"]) or "eroare necunoscuta")
+                raise CFPError(" ".join(reply["data"]) or "unknown error")
             return reply["data"]

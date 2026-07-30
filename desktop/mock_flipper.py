@@ -1,15 +1,15 @@
-"""Flipper simulat, cu aceeasi interfata ca CFPClient.
+"""A simulated Flipper, with the same interface as CFPClient.
 
-Serveste la dezvoltarea si testarea agentului fara dispozitivul fizic conectat.
-Raspunde exact ca firmware-ul real: doar 'ping' si 'info' reusesc, restul
-comenzilor din firmware raspund ERR not_implemented.
+Used for developing and testing the agent without the physical device connected.
+Responds exactly like the real firmware: only 'ping' and 'info' succeed, the rest
+of the firmware commands respond ERR not_implemented.
 """
 
 from protocol import CFPError
 
 IMPLEMENTED = {
     "ping": ["pong"],
-    "info": ["Flipper", "Zero", "(simulat)"],
+    "info": ["Flipper", "Zero", "(simulated)"],
 }
 
 STUBS = ("subghz.info", "ir.info", "nfc.info")
