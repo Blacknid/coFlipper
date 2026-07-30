@@ -1,12 +1,17 @@
 """A simulated Flipper, with the same interface as CFPClient.
 
-Used for developing and testing the agent without the physical device connected.
-Responds exactly like the real firmware: only 'ping' and 'info' succeed, the rest
-of the firmware commands respond ERR not_implemented.
+Serveste la dezvoltarea si testarea agentului fara dispozitivul fizic conectat.
+Raspunde ca firmware-ul real: reusesc doar comenzile pe care acesta le implementeaza
+(ping, info, subghz.rssi si comenzile ir.*), comenzile marcate ca stub raspund ERR
+not_implemented, iar orice altceva primeste ERR unknown_command.
 
-The IR bruteforce commands are simulated with real state (a queue, a counter), because
-the desktop side polls them in a loop: a stub that always answered the same thing would
-leave that loop spinning until its timeout.
+Valorile intoarse de subghz.rssi sunt fictive. Ele nu pot fi confundate cu masuratori
+reale: clientul e marcat 'simulated', iar marcajul insoteste fiecare rezultat trimis
+modelului (vezi CommandDispatcher._result).
+
+Comenzile de bruteforce IR sunt simulate cu stare reala (o coada, un contor), fiindca
+partea de desktop le interogheaza in bucla: un stub care ar raspunde mereu la fel ar
+lasa acea bucla sa se roteasca pana la expirarea timpului.
 """
 
 from protocol import CFPError
@@ -16,7 +21,26 @@ IMPLEMENTED = {
     "info": ["Flipper", "Zero", "(simulated)"],
 }
 
+# Comenzi pe care firmware-ul le recunoaste, dar nu le-a implementat inca: raspund
+# not_implemented, nu unknown_command, ca agentul sa vada aceeasi diferenta ca pe
+# dispozitivul real.
 STUBS = ("subghz.info", "ir.info", "nfc.info")
+
+# Comenzile de bruteforce IR servite cu stare simulata de _ir_request.
+IR_COMMANDS = ("ir.reset", "ir.queue", "ir.bruteforce", "ir.status")
+
+# Benzile in care emitatorul-receptor CC1101 al dispozitivului poate lucra. Firmware-ul
+# respinge orice frecventa din afara lor, deci simulatorul trebuie sa faca la fel:
+# altfel agentul ar fi dezvoltat pe un dispozitiv mai permisiv decat cel real.
+SUBGHZ_BANDS = (
+    (300_000_000, 348_000_000),
+    (387_000_000, 464_000_000),
+    (779_000_000, 928_000_000),
+)
+
+# Pasul de sinteza al CC1101: frecventa efectiv folosita e un multiplu al lui, nu exact
+# cea ceruta. Firmware-ul raporteaza valoarea reala, iar simulatorul o imita.
+SUBGHZ_STEP_HZ = 397
 
 
 class MockCFPClient:
@@ -92,8 +116,28 @@ class MockCFPClient:
         self.calls.append((cmd, args))
         if cmd in IMPLEMENTED:
             return IMPLEMENTED[cmd]
-        if cmd.startswith("ir.") and cmd in ("ir.reset", "ir.queue", "ir.bruteforce", "ir.status"):
+        if cmd in IR_COMMANDS:
             return self._ir_request(cmd, args)
+        if cmd == "subghz.rssi":
+            return self._subghz_rssi(args)
         if cmd in STUBS:
             raise CFPError("not_implemented")
         raise CFPError("unknown_command")
+
+    def _subghz_rssi(self, args):
+        if not args:
+            raise CFPError("missing_frequency")
+        try:
+            frequency = int(args[0])
+        except ValueError:
+            raise CFPError("invalid_frequency")
+        if not any(low <= frequency <= high for low, high in SUBGHZ_BANDS):
+            raise CFPError("invalid_frequency")
+
+        actual = frequency - frequency % SUBGHZ_STEP_HZ
+        # Valoare fictiva, dar stabila pentru aceeasi frecventa: o masuratoare care se
+        # schimba la fiecare apel ar face imposibila compararea a doua rulari de test.
+        decidbm = 600 + (frequency // 100_000) % 400
+        # Impartirea se face pe valoarea pozitiva: pentru numere negative, // rotunjeste
+        # in jos si ar transforma -75.5 dBm in -76.5 dBm.
+        return [str(actual), f"-{decidbm // 10}.{decidbm % 10}"]

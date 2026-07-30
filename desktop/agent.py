@@ -19,6 +19,7 @@ from google import genai
 from google.genai import errors, types
 
 from commands import CommandDispatcher, build_tool, device_commands, load_catalog
+from reasoning import ANSWER, THOUGHT, TOOL, Trace
 
 # Model fixat intentionat, nu un alias de tip "latest": aliasul urmareste mereu cea mai
 # recenta generatie, iar aceasta vine cu alte limite de utilizare.
@@ -30,6 +31,13 @@ MODEL = os.environ.get("COFLIPPER_MODEL", "gemini-3.5-flash")
 # error would interrupt the conversation in progress.
 SEND_RETRIES = 3
 RETRY_DELAY_S = 2.0
+
+# Modelele recente raționeaza inainte de a raspunde si pot returna un rezumat al acestui
+# raționament. Il cerem explicit: fara el, singurul lucru vizibil intre cererea
+# utilizatorului si raspunsul final ar fi lista comenzilor executate, nu si motivul
+# pentru care agentul a ales tocmai acele comenzi.
+# COFLIPPER_THOUGHTS=0 dezactiveaza cererea, pentru modelele care nu o accepta.
+INCLUDE_THOUGHTS = os.environ.get("COFLIPPER_THOUGHTS", "1") != "0"
 
 SYSTEM_INSTRUCTION = """Ești asistentul proiectului coFlipper. Controlezi un dispozitiv
 Flipper Zero conectat prin USB, folosind uneltele care ți-au fost puse la dispoziție.
@@ -47,24 +55,28 @@ Reguli pe care le respecți strict:
    timpul conversației, deci o comandă poate eșua deși una anterioară a reușit.
 3. Poți explica noțiuni tehnice generale din cunoștințele tale, dar marchezi clar
    diferența dintre explicație generală și date măsurate de dispozitiv.
-4. Raspunde in limba in care ai primit promptul.
-5. Pentru comenzi cu infrarosu ('stinge televizorul', 'da volumul mai tare', 'schimba
+4. Raspunde in limba in care ai primit promptul si raționezi in aceeasi limba: pasii
+   raționamentului tau sunt aratati utilizatorului, alaturi de comenzile executate.
+5. Raspunzi in text simplu, fara marcaje Markdown - fara asteriscuri, diez sau accente
+   grave. Raspunsul e afisat intr-o fereastra care nu interpreteaza astfel de marcaje,
+   deci ele ar aparea ca semne de punctuatie fara rost.
+6. Pentru comenzi cu infrarosu ('stinge televizorul', 'da volumul mai tare', 'schimba
    canalul') folosesti unealta agent_ir_control. Ii transmiti cererea utilizatorului
    asa cum a formulat-o, plus marca aparatului daca a mentionat-o. La cereri de
    continuare ('mai tare', 'inca un canal') transmiti explicit device_type, fiindca
    aparatul nu mai e numit, dar il stii din conversatie. Nu inventezi coduri IR si nu
    apelezi tu comenzile ir.* individuale: unealta le gestioneaza singura.
-6. Cand pornesti un bruteforce IR, spui utilizatorului sa apese butonul din mijloc (OK)
+7. Cand pornesti un bruteforce IR, spui utilizatorului sa apese butonul din mijloc (OK)
    pe Flipper in momentul in care aparatul reactioneaza - asa se opreste emisia. Daca
    rezultatul are 'worked': false, inseamna ca s-au epuizat codurile fara confirmare:
    spui asta deschis si propui sa incerce precizand marca, in loc sa pretinzi reusita.
-7. Daca utilizatorul spune ca nu a mers ('tot nu merge', 'nu s-a intamplat nimic'),
+8. Daca utilizatorul spune ca nu a mers ('tot nu merge', 'nu s-a intamplat nimic'),
    apelezi din nou agent_ir_control cu search_online=true, ca sa se caute in baza de
    date online de telecomenzi reale (mii de modele), nu doar in tabelul intern. Ai
    nevoie de marca aparatului: daca utilizatorul nu a spus-o, o ceri intai. Il anunti
    ca durata e mai mare, fiindca se descarca de pe internet. Dupa cinci incercari
    nereusite pe acelasi aparat, cautarea online porneste automat.
-8. In raspuns spui de unde au venit codurile: 'code_source': 'builtin' inseamna tabelul
+9. In raspuns spui de unde au venit codurile: 'code_source': 'builtin' inseamna tabelul
    intern, 'irdb' inseamna baza de date online. Daca rezultatul contine 'next_step', il
    folosesti ca sa-i spui utilizatorului ce urmeaza.
 """
@@ -105,9 +117,45 @@ def build_chat(api_key, commands, simulated=False):
         config=types.GenerateContentConfig(
             system_instruction=instruction,
             tools=[build_tool(commands)],
+            thinking_config=(
+                types.ThinkingConfig(include_thoughts=True) if INCLUDE_THOUGHTS else None
+            ),
         ),
     )
     return client, chat
+
+
+def _response_parts(response):
+    for candidate in response.candidates or []:
+        content = getattr(candidate, "content", None)
+        for part in (getattr(content, "parts", None) or []) if content else []:
+            yield part
+
+
+def thought_texts(response):
+    """Rezumatele de raționament din raspuns, in ordinea in care le-a produs modelul.
+
+    Un rezumat vine ca o bucata de text obisnuita, deosebita doar prin indicatorul
+    'thought'. Modelele care nu ofera rezumate returneaza pur si simplu zero bucati de
+    acest fel, iar lantul rezultat contine doar comenzile executate.
+    """
+    return [
+        part.text for part in _response_parts(response) if getattr(part, "thought", False) and part.text
+    ]
+
+
+def answer_text(response):
+    """Textul adresat utilizatorului, fara rezumatele de raționament.
+
+    Nu folosim direct response.text: acela poate include si bucatile de raționament,
+    care sunt notite interne ale modelului si au locul lor in lant, nu in raspuns.
+    """
+    chunks = [
+        part.text
+        for part in _response_parts(response)
+        if part.text and not getattr(part, "thought", False)
+    ]
+    return "".join(chunks).strip() or (response.text or "").strip()
 
 
 def send_with_retry(chat, message):
@@ -120,6 +168,14 @@ def send_with_retry(chat, message):
             print(f"  [gemini] service unavailable ({exc.code}), retrying...")
             time.sleep(RETRY_DELAY_S * attempt)
         except errors.ClientError as exc:
+            # Nu toate modelele accepta cererea de rezumate de raționament. Mesajul brut
+            # al API-ului nu spune ce trebuie schimbat, asa ca il traducem.
+            if exc.code == 400 and "thinking" in str(exc).lower():
+                sys.exit(
+                    f"Modelul {MODEL} nu accepta rezumate de raționament.\n"
+                    "Porneste din nou cu COFLIPPER_THOUGHTS=0: lantul va arata comenzile "
+                    "executate, dar fara explicatiile modelului."
+                )
             if exc.code != 429:
                 raise
             # A 429 with 'limit: 0' does not mean a quota we consumed ourselves, but a
@@ -136,27 +192,50 @@ def send_with_retry(chat, message):
             time.sleep(RETRY_DELAY_S * attempt * 5)
 
 
-def run_turn(chat, dispatcher, message, on_tool_call=None):
-    """Un tur de conversatie: poate include mai multe runde de apeluri de unelte.
+def run_turn(chat, dispatcher, message, on_step=None):
+    """Un tur de conversatie, construind lantul de raționament pe parcurs.
 
-    on_tool_call(nume, argumente, rezultat) e apelat pentru fiecare comanda executata
-    pe dispozitiv, ca sa poata fi afisata de interfata (consola sau fereastra grafica).
+    Un tur nu este un singur schimb de mesaje: modelul poate cere o masuratoare, o
+    interpreta, apoi decide ca are nevoie de alta inainte de a raspunde. Fiecare runda
+    contribuie cu pasi la lant - mai intai raționamentul, apoi comenzile pe care acesta
+    le-a motivat - iar la final raspunsul formulat pe baza lor.
+
+    on_step(pas) e apelat pentru fiecare pas, imediat ce se produce, ca afisajul sa
+    creasca in timp real si nu doar la sfarsitul turului.
+
+    Returneaza (raspuns, lant).
     """
+    trace = Trace(message)
+
+    def record(step):
+        if on_step:
+            on_step(step)
+        return step
+
+    record(trace.first)
     response = send_with_retry(chat, message)
 
-    while response.function_calls:
+    while True:
+        trace.next_round()
+        for thought in thought_texts(response):
+            record(trace.add_thought(thought))
+
+        if not response.function_calls:
+            break
+
         results = []
         for call in response.function_calls:
             args = dict(call.args or {})
             outcome = dispatcher.dispatch(call.name, call.args)
-            if on_tool_call:
-                on_tool_call(call.name, args, outcome)
+            record(trace.add_tool(call.name, args, outcome))
             results.append(
                 types.Part.from_function_response(name=call.name, response=outcome)
             )
         response = send_with_retry(chat, results)
 
-    return response.text
+    reply = answer_text(response)
+    record(trace.add_answer(reply))
+    return reply, trace
 
 
 def main():
@@ -195,16 +274,23 @@ def main():
     print(f"Unelte disponibile modelului: {names}")
     print("Scrie o cerere in limbaj natural. Ctrl+C pentru a incheia.\n")
 
-    def log_tool_call(name, args, outcome):
-        print(f"  [flipper] {name} {args}")
-        print(f"  [flipper] -> {outcome}")
+    def log_step(step):
+        """Lantul de raționament, afisat pe masura ce se construieste."""
+        if step.kind == THOUGHT:
+            print(f"  [gand] {step.text}")
+        elif step.kind == TOOL:
+            print(f"  [flipper] {step.name} {step.arg_line()}".rstrip())
+            print(f"  [flipper] -> {step.result_line()}")
+        elif step.kind == ANSWER:
+            print(f"  [agent] raspuns formulat dupa {step.at_s:.1f} s")
 
     try:
         while True:
             message = input("> ").strip()
             if not message:
                 continue
-            print(run_turn(chat, dispatcher, message, log_tool_call))
+            reply, _trace = run_turn(chat, dispatcher, message, log_step)
+            print(reply)
     except KeyboardInterrupt:
         print("\nSession stopped.")
     finally:

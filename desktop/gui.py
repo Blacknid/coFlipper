@@ -1,8 +1,9 @@
 """Interfata grafica a agentului coFlipper.
 
 Aceeasi functionalitate ca agent.py, dar intr-o fereastra: conversatia in stanga,
-comenzile trimise efectiv catre Flipper Zero in dreapta, ca sa fie mereu vizibil
-ce a facut agentul pe hardware, nu doar ce a raspuns in cuvinte.
+lantul de raționament in dreapta - gandurile modelului si comenzile trimise efectiv
+catre Flipper Zero, in ordinea in care s-au produs. Astfel raspunsul final nu apare ca
+un verdict, ci ca incheierea unui drum pe care utilizatorul il poate urmari.
 
 Aspectul urmeaza limbajul vizual al aplicatiei oficiale qFlipper: fundal foarte
 intunecat, portocaliul Flipper ca singura culoare de accent, panouri plate cu contur
@@ -28,6 +29,7 @@ from dotenv import load_dotenv
 
 from agent import MODEL, build_chat, run_turn
 from commands import CommandDispatcher, device_commands, load_catalog
+from reasoning import ANSWER, REQUEST, THOUGHT, TOOL, plain_text
 
 # Paleta qFlipper: fundal aproape negru, un singur accent portocaliu (#FF8200 este
 # portocaliul din identitatea Flipper Zero), restul in tonuri de gri.
@@ -48,6 +50,14 @@ WARN_YELLOW = "#E0B84C"
 # listei de porturi seriale, deci un interval scurt nu incarca sistemul.
 DEVICE_POLL_S = 1.5
 
+# Numarul pasului ocupa primul rand; restul textului se aliniaza sub el.
+STEP_INDENT = "   "
+
+
+def _indent(text):
+    """Aliniaza un rezumat de raționament, care poate avea mai multe paragrafe."""
+    return "\n".join(STEP_INDENT + line if line else "" for line in text.splitlines())
+
 
 class CoFlipperWindow:
     def __init__(self, root, mock=False):
@@ -63,6 +73,9 @@ class CoFlipperWindow:
         # Starea afisata cand agentul nu lucreaza, actualizata de firul de supraveghere.
         self.ready_status = "se conecteaza..."
         self.ready_color = FG_DIM
+        # Numerotarea pasilor reporneste la fiecare cerere: lantul se citeste pe turul curent.
+        self.step_no = 0
+        self.chain_used = False
 
         root.title("coFlipper")
         root.minsize(760, 460)
@@ -108,6 +121,10 @@ class CoFlipperWindow:
         # in panoul de comenzi; daca lipseste, Tk cade automat pe un font monospatiat.
         self.font_mono = tkfont.Font(family="Cascadia Code", size=9)
         self.font_label = tkfont.Font(family="Segoe UI", size=8, weight="bold")
+        # Gandurile modelului sunt proza, nu comenzi: font proportional si inclinat, ca
+        # sa se distinga la prima vedere de liniile monospatiate ale dispozitivului.
+        self.font_thought = tkfont.Font(family="Segoe UI", size=9, slant="italic")
+        self.font_step = tkfont.Font(family="Segoe UI", size=8, weight="bold")
 
     def _build_styles(self):
         """Bara de derulare implicita e cea a sistemului si strica tema intunecata."""
@@ -193,7 +210,7 @@ class CoFlipperWindow:
         panels.columnconfigure(1, weight=2)
 
         self._panel_label(panels, "CONVERSAȚIE", column=0)
-        self._panel_label(panels, "COMENZI PE DISPOZITIV", column=1, padx=(14, 0))
+        self._panel_label(panels, "LANȚ DE RAȚIONAMENT", column=1, padx=(14, 0))
 
         self.transcript = self._make_text(panels, self.font_body, "word", column=0)
         self.transcript.tag_configure("speaker", foreground=ORANGE, font=self.font_bold)
@@ -202,12 +219,18 @@ class CoFlipperWindow:
         self.transcript.tag_configure("error", foreground=ERR_RED, font=self.font_ui)
         self.transcript.tag_configure("warning", foreground=WARN_YELLOW, font=self.font_bold)
 
-        self.tools = self._make_text(panels, self.font_mono, "none", column=1, padx=(14, 0))
-        self.tools.tag_configure("call", foreground=FG)
-        self.tools.tag_configure("ok", foreground=OK_GREEN)
-        self.tools.tag_configure("err", foreground=ERR_RED)
-        self.tools.tag_configure("dim", foreground=FG_FAINT)
-        self.tools.tag_configure("warn", foreground=WARN_YELLOW)
+        # Incadrarea cuvintelor e necesara aici: pe langa comenzi, panoul afiseaza si
+        # gandurile modelului, care sunt fraze intregi.
+        self.chain = self._make_text(panels, self.font_mono, "word", column=1, padx=(14, 0))
+        self.chain.tag_configure("head", foreground=ORANGE, font=self.font_step, spacing3=6)
+        self.chain.tag_configure("num", foreground=FG_FAINT, font=self.font_step)
+        self.chain.tag_configure("label", foreground=FG_DIM, font=self.font_step)
+        self.chain.tag_configure("thought", foreground=FG_DIM, font=self.font_thought, spacing1=1)
+        self.chain.tag_configure("call", foreground=FG)
+        self.chain.tag_configure("ok", foreground=OK_GREEN)
+        self.chain.tag_configure("err", foreground=ERR_RED)
+        self.chain.tag_configure("dim", foreground=FG_FAINT)
+        self.chain.tag_configure("warn", foreground=WARN_YELLOW)
 
     def _panel_label(self, parent, text, column, padx=0):
         tk.Label(
@@ -367,7 +390,9 @@ class CoFlipperWindow:
 
     def _on_event_agent(self, payload):
         self._append(self.transcript, "Agent\n", "speaker")
-        self._append(self.transcript, payload + "\n\n", "agent")
+        # Instructiunea de sistem cere text simplu, dar modelul mai strecoara marcaje
+        # Markdown; aici sunt cele care ar aparea ca semne fara rost in fereastra.
+        self._append(self.transcript, plain_text(payload) + "\n\n", "agent")
         self._set_status(self.ready_status, self.ready_color)
         self._set_input_enabled(True)
         self.busy = False
@@ -404,24 +429,37 @@ class CoFlipperWindow:
         if not self.busy:
             self._set_status(self.ready_status, self.ready_color)
 
-    def _on_event_tool(self, payload):
-        name, args, outcome = payload
-        arg_text = " ".join(f"{k}={v}" for k, v in args.items()) or "(fara argumente)"
-        self._append(self.tools, f"{name}\n", "call")
-        self._append(self.tools, f"  {arg_text}\n", "dim")
-        if outcome.get("status") == "ok":
-            # Comenzile de dispozitiv intorc 'data'; cele de agent (ex. bruteforce-ul
-            # IR) intorc un rezumat propriu, deci afisam ce exista.
-            if "data" in outcome:
-                summary = " ".join(outcome["data"])
-            else:
-                summary = outcome.get("message") or outcome.get("outcome") or "gata"
-            self._append(self.tools, f"  OK  {summary}\n", "ok")
-        else:
-            self._append(self.tools, f"  ERR {outcome.get('error')}\n", "err")
-        if outcome.get("simulated"):
-            self._append(self.tools, "  (rezultat simulat)\n", "warn")
-        self._append(self.tools, "\n")
+    def _on_event_step(self, step):
+        """Un pas din lantul de raționament, adaugat in panoul din dreapta.
+
+        Bara de stare urmareste acelasi lant: cat timp agentul lucreaza, ea arata la ce
+        anume lucreaza in acel moment, nu doar faptul ca e ocupat.
+        """
+        if step.kind == REQUEST:
+            self.step_no = 0
+            if self.chain_used:
+                self._append(self.chain, "\n")
+            self.chain_used = True
+            self._append(self.chain, f"CERERE: {step.text}\n\n", "head")
+            return
+
+        self.step_no += 1
+        self._append(self.chain, f"{self.step_no}. ", "num")
+
+        if step.kind == THOUGHT:
+            self._append(self.chain, "raționament\n", "label")
+            self._append(self.chain, _indent(step.text) + "\n\n", "thought")
+            self._set_status("raționează...", ORANGE)
+        elif step.kind == TOOL:
+            self._append(self.chain, f"{step.name}\n", "call")
+            self._append(self.chain, f"{STEP_INDENT}{step.arg_line() or '(fara argumente)'}\n", "dim")
+            self._append(self.chain, f"{STEP_INDENT}{step.result_line()}\n", "ok" if step.ok else "err")
+            if step.simulated:
+                self._append(self.chain, f"{STEP_INDENT}(rezultat simulat)\n", "warn")
+            self._append(self.chain, "\n")
+            self._set_status(f"execută {step.name}...", ORANGE)
+        elif step.kind == ANSWER:
+            self._append(self.chain, f"răspuns formulat ({step.at_s:.1f} s)\n", "label")
 
     def _on_event_ir_progress(self, payload):
         sent, total = payload
@@ -519,11 +557,11 @@ class CoFlipperWindow:
 
     def _worker(self, message):
         try:
-            reply = run_turn(
+            reply, _trace = run_turn(
                 self.chat,
                 self.dispatcher,
                 message,
-                lambda name, args, outcome: self._emit("tool", (name, args, outcome)),
+                lambda step: self._emit("step", step),
             )
             self._emit("agent", reply or "(raspuns gol)")
         except SystemExit as exc:
