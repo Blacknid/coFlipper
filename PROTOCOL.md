@@ -48,7 +48,18 @@ The full catalog, including commands still at the design stage, is in commands.j
 
 ## The Wi-Fi module (Marauder board)
 
-Commands in the `wifi.*` and `ble.*` families are not served by the Flipper itself but by an ESP32 Wi-Fi dev board flashed with [Marauder](https://github.com/justcallmekoko/ESP32Marauder) firmware, attached to the Flipper's GPIO/UART header. The coFlipper CFP application on the Flipper forwards these frames to the board over its second UART and relays the reply, so from the desktop client's point of view they are ordinary CFP commands.
+Commands in the `wifi.*` and `ble.*` families are not served by the Flipper itself but by an ESP32 Wi-Fi dev board, built on [Marauder](https://github.com/justcallmekoko/ESP32Marauder), attached to the Flipper's GPIO/UART header. The coFlipper CFP application on the Flipper is a *transparent forwarder* for these frames: it does not parse or interpret them. When a command's name begins with `wifi.` or `ble.` (or is `marauder.reboot`), the firmware sends it out the second UART and relays back, unchanged, the one line the board answers with. From the desktop client's point of view they are therefore ordinary CFP commands.
+
+Because the Flipper forwards rather than translates, the board runs a small CFP-speaking bridge over Marauder rather than stock Marauder firmware: the bridge maps each CFP command onto the corresponding Marauder operation and formats its result as a CFP response. The bridge lets the desktop, the protocol and the Flipper stay identical whether a command is served on the Flipper or on the board.
+
+On the wire to the board, the framing is the same CFP grammar minus the `cfp` CLI word, since the GPIO UART is a dedicated point-to-point link and not a shared command line:
+
+    desktop --USB CLI-->  Flipper:  cfp 7 wifi.scan_ap 8000
+    Flipper --GPIO UART-> board:    7 wifi.scan_ap 8000\n
+    board   --GPIO UART-> Flipper:  CFP/1 7 OK captured 9 access_points\n
+    Flipper --USB CLI-->  desktop:  CFP/1 7 OK captured 9 access_points
+
+If the board sends nothing within the forwarder's timeout — no board attached, or it is unpowered — the Flipper answers `CFP/1 <id> ERR wifi_board_not_connected` itself, so the desktop and the model see a definite cause rather than a silent timeout.
 
 These commands cover the whole Marauder feature set: tuning the channel; scanning and listing access points and their client stations; selecting a target; passive sniffing (beacons, probes, deauth-detection, WPA handshakes/PMKID, raw capture); active attacks (deauthentication, beacon spam, evil-portal, karma, probe flood); wardriving with GPS; and the Bluetooth side (BLE scanning, AirTag/tracker detection, and per-vendor pairing spam). Each carries an `impact` field in commands.json — `passive` (only listens) or `offensive` (transmits and disrupts other devices) — and the agent is instructed to obtain the user's authorization before any offensive one. Marauder scans and attacks run continuously until stopped with `wifi.stop` / `ble.stop`.
 

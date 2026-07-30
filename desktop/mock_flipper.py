@@ -72,6 +72,10 @@ _AP_FIXTURES = (
     ("TP-LINK_2G", "A2:14:6B:0C:11:06", 9, -80, "WPA2"),
     ("HiddenNet", "A2:14:6B:0C:11:07", 6, -67, "WPA3"),
     ("AndroidAP_1234", "A2:14:6B:0C:11:08", 4, -49, "WPA2"),
+    # A DIGI/RCS-RDS home router (a common ISP in Romania); stands in for "the user's own
+    # network in range" so the authorized-deauth flow can be demonstrated end to end. As
+    # fictitious as every other fixture, and reaches the model marked 'simulated'.
+    ("DIGI_f7c1500", "A2:14:6B:0C:11:09", 1, -44, "WPA2"),
 )
 
 # Client stations, each associated with one access point above (by its index). MAC, the
@@ -82,6 +86,10 @@ _STA_FIXTURES = (
     ("A4:83:E7:7B:10:03", 1, -60),
     ("D0:37:45:1E:10:04", 2, -65),
     ("B8:27:EB:22:10:05", 7, -50),
+    # Two clients on DIGI_f7c1500 (AP index 8): a phone and a laptop, so the network can
+    # be deauthenticated either as a whole (select_ap 8) or one client at a time.
+    ("C8:3D:D4:5F:10:06", 8, -48),
+    ("7A:11:2E:90:10:07", 8, -57),
 )
 
 # BLE devices the ble.scan simulator hands out. MAC, advertised name, RSSI dBm.
