@@ -1,9 +1,9 @@
-"""Conexiune care urmareste in timp real prezenta dispozitivului.
+"""A connection that keeps track of the device's presence in real time.
 
-Expune aceeasi interfata ca CFPClient (metoda request), deci poate fi folosita direct
-de CommandDispatcher: acesta nu trebuie sa stie daca dispozitivul e prezent sau nu.
-Diferenta e ca dispozitivul poate fi conectat sau deconectat in timpul rularii, iar
-starea se actualizeaza prin apeluri repetate la poll().
+It exposes the same interface as CFPClient (the request method), so it can be used
+directly by CommandDispatcher: that one does not have to know whether the device is
+present or not. The difference is that the device can be plugged in or unplugged while
+the program is running, and the state is refreshed by repeated calls to poll().
 """
 
 import threading
@@ -11,9 +11,9 @@ import threading
 from cfp_client import find_flipper_ports
 from protocol import CFPClient, CFPError
 
-# Portul serial exista doar cat timp Flipper-ul e conectat, dar prezenta portului nu
-# garanteaza ca aplicatia CFP ruleaza pe dispozitiv: sunt doua stari distincte, iar
-# utilizatorul are nevoie de indicatii diferite in fiecare caz.
+# The serial port exists only while the Flipper is plugged in, but the presence of the
+# port does not guarantee that the CFP application is running on the device: these are
+# two distinct states, and the user needs different guidance in each of them.
 DISCONNECTED = "disconnected"
 NO_APP = "no_app"
 CONNECTED = "connected"
@@ -28,8 +28,8 @@ class LiveDevice:
     simulated = False
 
     def __init__(self):
-        # Blocheaza accesul concurent: firul care poarta conversatia trimite comenzi,
-        # in timp ce firul de supraveghere poate inchide sau deschide portul.
+        # Locks out concurrent access: the thread that carries the conversation sends
+        # commands, while the monitoring thread may close or open the port underneath it.
         self._lock = threading.RLock()
         self._client = None
         self._port = None
@@ -60,13 +60,13 @@ class LiveDevice:
             try:
                 return self._client.request(cmd, *args)
             except CFPError:
-                raise  # eroare raportata de dispozitiv, conexiunea e in regula
+                raise  # error reported by the device, the connection itself is fine
             except Exception:
                 self._drop()
                 raise CFPError("conexiunea cu dispozitivul s-a intrerupt")
 
     def poll(self):
-        """Reevalueaza starea. Returneaza noua stare daca s-a schimbat, altfel None."""
+        """Re-evaluates the state. Returns the new state if it changed, otherwise None."""
         with self._lock:
             ports = find_flipper_ports()
 
@@ -75,8 +75,8 @@ class LiveDevice:
                 return self.state
 
             if self.state == CONNECTED:
-                # Pierderea conexiunii se observa prin dispariția portului sau prin
-                # eroarea unei comenzi, deci nu interogam dispozitivul la fiecare ciclu.
+                # Losing the connection shows up either as the port disappearing or as a
+                # failing command, so we do not interrogate the device on every cycle.
                 return None
 
             if not ports:

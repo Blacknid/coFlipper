@@ -68,10 +68,10 @@ def looks_like_flipper(port):
 
 
 def find_flipper_ports():
-    """Porturile care par a fi un Flipper Zero, cele mai probabile primele.
+    """The ports that look like a Flipper Zero, the most likely ones first.
 
-    Varianta neinteractiva a lui pick_port(), folosita de interfata grafica: aceasta
-    nu poate pune intrebari la stdin, deci are nevoie de lista bruta de candidati.
+    The non-interactive counterpart of pick_port(), used by the graphical interface:
+    that one cannot ask questions on stdin, so it needs the raw list of candidates.
     """
     ports = list(serial.tools.list_ports.comports())
     return [p.device for p in ports if looks_like_flipper(p)]
@@ -254,8 +254,15 @@ def main():
     args = parser.parse_args()
 
     if args.list_ports:
-        for device, desc in list_ports():
-            print(f"{device}\t{desc}")
+        ports = list(serial.tools.list_ports.comports())
+        if not ports:
+            print("No serial port found.")
+            return 0
+        # Every port is listed, not only the candidates: when detection fails, what the
+        # user needs to see is precisely the port that was not recognised.
+        for port in ports:
+            mark = " <- looks like a Flipper Zero" if looks_like_flipper(port) else ""
+            print(f"{port.device}\t{port.description or '(no description)'}{mark}")
         return 0
 
     try:

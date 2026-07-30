@@ -30,7 +30,7 @@ Note that `loader close` has no effect on this application — the loader report
 
 ## Verification status
 
-The application has been compiled, installed, and tested on a physical Flipper Zero. The `ping` and `info` commands return real device data, and the commands not yet implemented (`subghz.info`, `ir.info`, `nfc.info`) respond, by design, with `ERR not_implemented`. A nonexistent command produces `ERR unknown_command`.
+The application has been compiled, installed, and tested on a physical Flipper Zero. The commands the firmware actually handles are the four in `cfp_dispatch` (`cfp_app.c`): `ping` and `info` return real device data, `subghz.rssi` returns a real measurement taken with the CC1101 (the frequency the synthesizer produced, plus the peak signal level), and `exit` closes the application remotely. Anything else — including the commands from `commands.json` that are still at the design stage — falls through to the single `else` branch and produces `ERR unknown_command`; the firmware has no `not_implemented` code and never emits one. Malformed requests are reported separately: a frame without both an identifier and a command gives `ERR bad_frame`, and `subghz.rssi` gives `ERR missing_frequency` or `ERR invalid_frequency`.
 
 ## Two observations useful for further development
 

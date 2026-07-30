@@ -18,13 +18,13 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import errors, types
 
-from commands import CommandDispatcher, build_tool, device_commands, load_catalog
-from reasoning import ANSWER, THOUGHT, TOOL, Trace
+from commands import CommandDispatcher, build_tool, load_catalog, model_commands
+from reasoning import ANSWER, REPORT, SPAWN, THOUGHT, TOOL, Trace
 
-# Model fixat intentionat, nu un alias de tip "latest": aliasul urmareste mereu cea mai
-# recenta generatie, iar aceasta vine cu alte limite de utilizare.
-# Pe planul gratuit fiecare model are aproximativ 20 de cereri pe zi, numarate separat,
-# deci schimbarea modelului prin variabila de mediu COFLIPPER_MODEL ofera o cota nouă.
+# A deliberately pinned model, not a "latest" alias: the alias always tracks the most
+# recent generation, and that generation comes with different usage limits.
+# On the free plan each model has roughly 20 requests per day, counted separately, so
+# switching model through the COFLIPPER_MODEL environment variable grants a fresh quota.
 MODEL = os.environ.get("COFLIPPER_MODEL", "gemini-3.5-flash")
 
 # The API occasionally returns 503 when overloaded. Without a retry, such a transient
@@ -32,45 +32,82 @@ MODEL = os.environ.get("COFLIPPER_MODEL", "gemini-3.5-flash")
 SEND_RETRIES = 3
 RETRY_DELAY_S = 2.0
 
-# Modelele recente raționeaza inainte de a raspunde si pot returna un rezumat al acestui
-# raționament. Il cerem explicit: fara el, singurul lucru vizibil intre cererea
-# utilizatorului si raspunsul final ar fi lista comenzilor executate, nu si motivul
-# pentru care agentul a ales tocmai acele comenzi.
-# COFLIPPER_THOUGHTS=0 dezactiveaza cererea, pentru modelele care nu o accepta.
+# Recent models reason before answering and can return a summary of that reasoning. We
+# request it explicitly: without it, the only thing visible between the user's request and
+# the final answer would be the list of executed commands, not the reason the agent chose
+# exactly those commands.
+# COFLIPPER_THOUGHTS=0 disables the request, for models that do not accept it.
 INCLUDE_THOUGHTS = os.environ.get("COFLIPPER_THOUGHTS", "1") != "0"
 
-SYSTEM_INSTRUCTION = """Ești asistentul proiectului coFlipper. Controlezi un dispozitiv
-Flipper Zero conectat prin USB, folosind uneltele care ți-au fost puse la dispoziție.
+SYSTEM_INSTRUCTION = """You are the assistant of the coFlipper project. You control a
+Flipper Zero device connected over USB, using the tools placed at your disposal.
 
-Reguli pe care le respecți strict:
-1. Orice informație despre starea dispozitivului sau despre semnalele din jur provine
-   EXCLUSIV din rezultatul unei unelte apelate. Nu inventezi niciodată frecvențe,
-   UID-uri, protocoale sau citiri hardware.
-2. Dacă o unealtă răspunde cu eroare, spui deschis utilizatorului ce a eșuat și nu
-   compensezi eroarea cu un răspuns plauzibil inventat. Erorile obișnuite sunt
-   'not_implemented' (funcția nu există încă în firmware), 'dispozitiv neconectat'
-   (Flipper Zero nu este legat prin USB — îi ceri utilizatorului să îl conecteze) și
-   'aplicatia coFlipper CFP nu ruleaza pe dispozitiv' (îi ceri să o pornească din
-   meniul Flipper-ului). Dispozitivul poate fi conectat sau deconectat oricând în
-   timpul conversației, deci o comandă poate eșua deși una anterioară a reușit.
-3. Poți explica noțiuni tehnice generale din cunoștințele tale, dar marchezi clar
-   diferența dintre explicație generală și date măsurate de dispozitiv.
-4. Raspunde in limba in care ai primit promptul si raționezi in aceeasi limba: pasii
-   raționamentului tau sunt aratati utilizatorului, alaturi de comenzile executate.
-5. Raspunzi in text simplu, fara marcaje Markdown - fara asteriscuri, diez sau accente
-   grave. Raspunsul e afisat intr-o fereastra care nu interpreteaza astfel de marcaje,
-   deci ele ar aparea ca semne de punctuatie fara rost.
+Rules you follow strictly:
+1. Any information about the state of the device or about surrounding signals comes
+   EXCLUSIVELY from the result of a tool you called. You never invent frequencies, UIDs,
+   protocols or hardware readings.
+2. If a tool answers with an error, you tell the user openly what failed, and you do not
+   compensate for the error with a plausible invented answer. The errors the device
+   returns are 'unknown_command' (the firmware does not know that command), 'bad_frame',
+   'missing_frequency' and 'invalid_frequency' (the frequency is outside the bands the
+   CC1101 transceiver can reach: roughly 300-348, 387-464 and 779-928 MHz). The
+   connection itself adds two: 'device not connected' (the Flipper Zero is not attached
+   over USB - you ask the user to connect it) and 'the coFlipper CFP application is not
+   running on the device' (you ask them to start it from the Flipper's menu). The device
+   can be connected or disconnected at any moment during the conversation, so one command
+   may fail even though an earlier one succeeded.
+3. You may explain general technical notions from your own knowledge, but you mark
+   clearly the difference between a general explanation and data measured by the device.
+4. Answer in the language in which you received the prompt, and reason in that same
+   language: the steps of your reasoning are shown to the user, alongside the executed
+   commands.
+5. You answer in plain text, without Markdown markup - no asterisks, hashes or backticks.
+   The answer is displayed in a window that does not interpret such markup, so it would
+   appear as pointless punctuation.
+6. Some tools do not execute a command themselves but delegate the work to a specialised
+   subagent, which carries it out and reports back to you. Their descriptions say so.
+   Delegate when the job needs several successive measurements, or when the question is
+   about what the session has already done rather than about the present moment. A
+   subagent's report reaches you together with the raw readings behind it: if the two
+   disagree, you trust the readings and say so.
+7. An optional Wi-Fi dev board - an ESP32 flashed with Marauder firmware - may be attached
+   to the Flipper's GPIO/UART header. It unlocks the wifi.* and ble.* tools: scanning for
+   networks and Bluetooth devices, sniffing frames, capturing handshakes, and active
+   operations such as deauthentication, beacon spam, evil-portal and BLE pairing spam. How
+   you use them:
+   - Each device tool is either passive (only listens or reads: scans, lists, sniffs, GPS,
+     wardrive, board_info) or offensive (transmits and disrupts other devices: wifi.attack_*,
+     wifi.evil_portal, wifi.karma, ble.spam_*). Passive tools you may use freely to survey
+     the environment.
+   - Before ANY offensive tool, you FIRST ask the user to confirm, in one sentence, that
+     they own the target network/device or have explicit written authorization to test it.
+     You send the command only after they confirm. If they decline or cannot confirm, you
+     refuse and briefly explain that deauthenticating, impersonating or spamming networks
+     and devices you are not authorized to touch is both harmful and, in most places,
+     illegal. You never turn a refusal into instructions for doing it anyway.
+   - Most attacks act on a target chosen beforehand with wifi.select_ap / wifi.select_station.
+     When the user names a network, first scan (wifi.scan_ap) and list (wifi.list_ap), match
+     the name, and select just that one - do not attack everything in range unless the user
+     explicitly asks for that and confirms authorization for the whole environment. For an
+     open question like 'what is around', prefer delegating to the wifi_recon subagent.
+   - Marauder operations run continuously until stopped. Send wifi.stop / ble.stop as soon
+     as the user's goal is met, and always before starting a different operation.
+   - Wi-Fi/BLE tools add their own errors: 'wifi_board_not_connected' (the ESP32 Marauder
+     board is not attached or powered - tell the user to connect it to the GPIO header),
+     'no_target_selected' (an attack was requested before selecting a target - scan, list
+     and select first), 'invalid_channel', 'invalid_selection' and 'unknown_command' (the
+     board's firmware does not know that command).
 """
 
-# Adaugat la instructiunea de sistem cand se lucreaza fara dispozitiv fizic. Fara el,
-# modelul primeste raspunsuri verosimile de la simulator si anunta utilizatorul ca
-# Flipper-ul e conectat si functioneaza - exact confuzia pe care proiectul o evita.
+# Appended to the system instruction when working without a physical device. Without it,
+# the model receives plausible responses from the simulator and tells the user the Flipper
+# is connected and working - exactly the confusion this project set out to avoid.
 SIMULATED_NOTICE = """
-ATENȚIE - MOD SIMULAT: niciun Flipper Zero fizic nu este conectat. Toate uneltele sunt
-servite de un simulator, iar rezultatele lor sunt fictive. Ele conțin câmpul
-'simulated': true. Nu afirmi niciodată că dispozitivul este conectat sau că o valoare a
-fost măsurată. În fiecare răspuns care se referă la starea dispozitivului sau la
-semnale, precizezi explicit că datele provin dintr-un simulator.
+WARNING - SIMULATED MODE: no physical Flipper Zero is connected. Every tool is served by
+a simulator, and their results are fictitious. They carry the field 'simulated': true.
+You never state that the device is connected or that a value was measured. In every
+answer that refers to the state of the device or to signals, you state explicitly that
+the data comes from a simulator.
 """
 
 
@@ -82,11 +119,11 @@ def build_client_for_device():
 
 
 def build_chat(api_key, commands, simulated=False):
-    """Sesiunea de conversatie, cu uneltele derivate din catalogul de comenzi.
+    """The conversation session, with the tools derived from the command catalog.
 
-    Returneaza si clientul, nu doar conversatia: apelantul trebuie sa pastreze o
-    referinta la el, altfel colectorul de gunoaie il distruge si inchide conexiunea
-    HTTP pe care se sprijina conversatia.
+    Returns the client as well, not only the chat: the caller has to keep a reference to
+    it, otherwise the garbage collector destroys it and closes the HTTP connection the
+    conversation relies on.
     """
     instruction = SYSTEM_INSTRUCTION
     if simulated:
@@ -114,11 +151,11 @@ def _response_parts(response):
 
 
 def thought_texts(response):
-    """Rezumatele de raționament din raspuns, in ordinea in care le-a produs modelul.
+    """The reasoning summaries in the response, in the order the model produced them.
 
-    Un rezumat vine ca o bucata de text obisnuita, deosebita doar prin indicatorul
-    'thought'. Modelele care nu ofera rezumate returneaza pur si simplu zero bucati de
-    acest fel, iar lantul rezultat contine doar comenzile executate.
+    A summary arrives as an ordinary piece of text, distinguished only by the 'thought'
+    flag. Models that offer no summaries simply return zero pieces of this kind, and the
+    resulting chain contains only the executed commands.
     """
     return [
         part.text for part in _response_parts(response) if getattr(part, "thought", False) and part.text
@@ -126,10 +163,10 @@ def thought_texts(response):
 
 
 def answer_text(response):
-    """Textul adresat utilizatorului, fara rezumatele de raționament.
+    """The text addressed to the user, without the reasoning summaries.
 
-    Nu folosim direct response.text: acela poate include si bucatile de raționament,
-    care sunt notite interne ale modelului si au locul lor in lant, nu in raspuns.
+    We do not use response.text directly: it can include the reasoning parts as well,
+    which are the model's internal notes and belong in the chain, not in the answer.
     """
     chunks = [
         part.text
@@ -149,13 +186,13 @@ def send_with_retry(chat, message):
             print(f"  [gemini] service unavailable ({exc.code}), retrying...")
             time.sleep(RETRY_DELAY_S * attempt)
         except errors.ClientError as exc:
-            # Nu toate modelele accepta cererea de rezumate de raționament. Mesajul brut
-            # al API-ului nu spune ce trebuie schimbat, asa ca il traducem.
+            # Not all models accept the request for reasoning summaries. The API's raw
+            # message does not say what needs changing, so we translate it.
             if exc.code == 400 and "thinking" in str(exc).lower():
                 sys.exit(
-                    f"Modelul {MODEL} nu accepta rezumate de raționament.\n"
-                    "Porneste din nou cu COFLIPPER_THOUGHTS=0: lantul va arata comenzile "
-                    "executate, dar fara explicatiile modelului."
+                    f"The model {MODEL} does not accept reasoning summaries.\n"
+                    "Start again with COFLIPPER_THOUGHTS=0: the chain will show the "
+                    "executed commands, but without the model's explanations."
                 )
             if exc.code != 429:
                 raise
@@ -174,17 +211,20 @@ def send_with_retry(chat, message):
 
 
 def run_turn(chat, dispatcher, message, on_step=None):
-    """Un tur de conversatie, construind lantul de raționament pe parcurs.
+    """One conversation turn, building the reasoning chain as it goes.
 
-    Un tur nu este un singur schimb de mesaje: modelul poate cere o masuratoare, o
-    interpreta, apoi decide ca are nevoie de alta inainte de a raspunde. Fiecare runda
-    contribuie cu pasi la lant - mai intai raționamentul, apoi comenzile pe care acesta
-    le-a motivat - iar la final raspunsul formulat pe baza lor.
+    A turn is not a single exchange of messages: the model may ask for a measurement,
+    interpret it, then decide it needs another one before answering. Every round
+    contributes steps to the chain - first the reasoning, then the commands that reasoning
+    motivated - and at the end the answer phrased on the basis of them.
 
-    on_step(pas) e apelat pentru fiecare pas, imediat ce se produce, ca afisajul sa
-    creasca in timp real si nu doar la sfarsitul turului.
+    A round may also summon a subagent. Its steps enter the same chain, one level deeper,
+    so the delegated work stays visible instead of collapsing into a single opaque result.
 
-    Returneaza (raspuns, lant).
+    on_step(step) is called for every step as soon as it happens, so the display grows in
+    real time rather than only at the end of the turn.
+
+    Returns (answer, chain).
     """
     trace = Trace(message)
 
@@ -192,6 +232,29 @@ def run_turn(chat, dispatcher, message, on_step=None):
         if on_step:
             on_step(step)
         return step
+
+    def subagent_event(kind, **fields):
+        """Turns a subagent's progress into steps of this chain, nested one level.
+
+        The subagent knows nothing about the chain; it only announces what it is doing.
+        Translating those announcements here keeps ownership of the chain in one place.
+        """
+        if kind == "spawn":
+            record(trace.add_spawn(fields["name"], fields["task"], fields["meta"]))
+        elif kind == "thought":
+            record(trace.add_thought(fields["text"], depth=1, source=fields["source"]))
+        elif kind == "tool":
+            record(
+                trace.add_tool(
+                    fields["name"],
+                    fields["args"],
+                    fields["outcome"],
+                    depth=1,
+                    source=fields["source"],
+                )
+            )
+        elif kind == "report":
+            record(trace.add_report(fields["name"], fields["text"], fields["meta"], depth=1))
 
     record(trace.first)
     response = send_with_retry(chat, message)
@@ -207,8 +270,11 @@ def run_turn(chat, dispatcher, message, on_step=None):
         results = []
         for call in response.function_calls:
             args = dict(call.args or {})
-            outcome = dispatcher.dispatch(call.name, call.args)
-            record(trace.add_tool(call.name, args, outcome))
+            outcome = dispatcher.dispatch(call.name, call.args, on_subagent_event=subagent_event)
+            # A delegated call has already reported itself through subagent_event, spawn
+            # step included; adding a tool step as well would duplicate it in the chain.
+            if not outcome.get("subagent"):
+                record(trace.add_tool(call.name, args, outcome))
             results.append(
                 types.Part.from_function_response(name=call.name, response=outcome)
             )
@@ -234,7 +300,7 @@ def main():
         sys.exit("GEMINI_API_KEY is not set. Put it in desktop/.env (see .env.example).")
 
     catalog = load_catalog()
-    commands = device_commands(catalog)
+    commands = model_commands(catalog)
     if not commands:
         sys.exit("No command available in commands.json.")
 
@@ -247,23 +313,36 @@ def main():
         flipper = build_client_for_device()
 
     dispatcher = CommandDispatcher(commands, flipper)
-    # genai_client nu e folosit direct, dar referinta trebuie pastrata cat dureaza
-    # conversatia (vezi build_chat).
+    # Imported here rather than at module level: subagents.py imports this module, so a
+    # top-level import in both directions would be circular.
+    from subagents import SubagentRunner
+
+    dispatcher.subagents = SubagentRunner(api_key, dispatcher, dispatcher.simulated)
+    # genai_client is not used directly, but the reference has to be kept for as long as
+    # the conversation lasts (see build_chat).
     genai_client, chat = build_chat(api_key, commands, dispatcher.simulated)  # noqa: F841
 
     names = ", ".join(cmd["name"] for cmd in commands)
-    print(f"Unelte disponibile modelului: {names}")
-    print("Scrie o cerere in limbaj natural. Ctrl+C pentru a incheia.\n")
+    print(f"Tools available to the model: {names}")
+    print("Write a request in natural language. Ctrl+C to finish.\n")
 
     def log_step(step):
-        """Lantul de raționament, afisat pe masura ce se construieste."""
+        """The reasoning chain, printed as it is built."""
+        indent = "    " * step.depth
         if step.kind == THOUGHT:
-            print(f"  [gand] {step.text}")
+            print(f"  {indent}[thought] {step.text}")
         elif step.kind == TOOL:
-            print(f"  [flipper] {step.name} {step.arg_line()}".rstrip())
-            print(f"  [flipper] -> {step.result_line()}")
+            print(f"  {indent}[flipper] {step.name} {step.arg_line()}".rstrip())
+            print(f"  {indent}[flipper] -> {step.result_line()}")
+        elif step.kind == SPAWN:
+            print(f"  [subagent] {step.name} summoned: {step.meta.get('role', '')}")
+            print(f"  [subagent] model {step.meta.get('model')}, "
+                  f"tools: {', '.join(step.meta.get('tools') or ['none'])}")
+        elif step.kind == REPORT:
+            print(f"  {indent}[subagent] {step.name} reports to the agent "
+                  f"({step.meta.get('commands', 0)} commands): {step.text}")
         elif step.kind == ANSWER:
-            print(f"  [agent] raspuns formulat dupa {step.at_s:.1f} s")
+            print(f"  [agent] answer phrased after {step.at_s:.1f} s")
 
     try:
         while True:

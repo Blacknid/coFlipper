@@ -40,7 +40,7 @@ def decode_frame(line):
 
 
 class CFPClient:
-    # Opusul lui MockCFPClient.simulated: datele vin de la hardware real.
+    # The opposite of MockCFPClient.simulated: the data comes from real hardware.
     simulated = False
 
     def __init__(self, port, baudrate=DEFAULT_BAUDRATE, timeout=DEFAULT_TIMEOUT):

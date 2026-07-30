@@ -30,26 +30,26 @@ Within the OPEN section, we set out to explore and implement the following funct
 - Infrared interaction — using the Flipper Zero's IR module to identify and, potentially, replicate signals emitted by remote controls or other compatible devices.
 - NFC interaction — an illustrative scenario for this direction would be one where the user points the agent at a particular mobile phone, and the agent builds, based on that request, a routine that allows observing the entities or access points that the phone's NFC module comes into contact with.
 
-These three directions are not exhaustive; they are a starting point for validating the concept within the time available for the contest. As the implementation advances, other Flipper Zero capabilities (such as Sub-GHz, low-frequency RFID, or the GPIO module) can be integrated in the same way.
+These three directions are not exhaustive; they are a starting point for validating the concept within the time available for the contest. Of the three, radio frequency analysis is the one carried through to working hardware: the agent measures the signal level on a requested frequency and interprets it. Infrared and NFC remain described in the command catalog but not yet implemented in firmware. As the implementation advances, the remaining Flipper Zero capabilities (low-frequency RFID, the GPIO module, Sub-GHz capture and replay) can be integrated in the same way, since adding a command means describing it in the catalog rather than changing the agent.
 
 ## Proposed architecture
 
 The project is organized around two main components, mirrored in the repository structure:
 
-- flipper/ — logica destinată să ruleze pe (sau în relație directă cu) dispozitivul Flipper Zero: comunicarea cu modulele sale radio, IR și NFC, precum și expunerea acestor capabilități către restul sistemului.
-- desktop/ — componenta agentică propriu-zisă, responsabilă de interpretarea cererilor utilizatorului, decizia asupra pașilor necesari și orchestrarea comenzilor trimise către Flipper Zero. Include aplicația cu interfață grafică prin care utilizatorul interacționează efectiv cu sistemul.
+- flipper/ — the logic meant to run on (or in direct relation to) the Flipper Zero device: communication with its radio, IR and NFC modules, and the exposure of those capabilities to the rest of the system.
+- desktop/ — the agentic component proper, responsible for interpreting the user's requests, deciding on the steps required and orchestrating the commands sent to the Flipper Zero. It includes the graphical application through which the user actually interacts with the system.
 
-Separarea celor două componente urmărește un principiu simplu: dispozitivul rămâne executantul operațiunilor de nivel jos, în timp ce agentul concentrează întreaga logică de interpretare și decizie, fiind singurul punct cu care utilizatorul interacționează direct, în limbaj natural.
+The separation of the two components follows a simple principle: the device remains the executor of low-level operations, while the agent concentrates the whole of the interpretation and decision logic, being the only point the user interacts with directly, in natural language.
 
-Comunicarea dintre cele două componente se face prin portul serial USB al Flipper Zero, folosind un protocol text propriu, denumit CFP (coFlipper Protocol) și documentat integral în PROTOCOL.md.
+Communication between the two components goes over the Flipper Zero's USB serial port, using a text protocol of our own, named CFP (coFlipper Protocol) and documented in full in PROTOCOL.md.
 
 The link between the language model and the device is realized through a declarative command catalog, commands.json. This is the system's single source of truth: every command described there is automatically converted, when the agent starts, into a tool the model can call (*function calling*). Adding a new capability therefore means describing it in the catalog and implementing it in firmware, with no changes to the agent's logic.
 
-Fluxul complet al unei cereri este următorul: utilizatorul formulează o intenție în limbaj natural; modelul decide care comenzi din catalog sunt necesare și le solicită; agentul le traduce în cadre CFP și le trimite pe portul serial; Flipper Zero le execută și răspunde; rezultatele reale sunt returnate modelului, care formulează pe baza lor răspunsul final.
-
-Interacțiunea are loc într-o aplicație cu interfață grafică, organizată în două panouri: conversația și, permanent vizibil alături de ea, lanțul de raționament al agentului — raționamentele modelului și comenzile executate efectiv pe dispozitiv, în ordinea în care s-au produs. Această a doua zonă are o funcție care depășește depanarea: permite utilizatorului să verifice că afirmațiile agentului se sprijină pe măsurători reale, nu pe formulări plauzibile.
+The complete flow of a request is as follows: the user phrases an intent in natural language; the model decides which commands from the catalog are needed and requests them; the agent translates them into CFP frames and sends them over the serial port; the Flipper Zero executes them and responds; the real results are returned to the model, which phrases the final answer on their basis. For work that needs many successive measurements, or that only has to research what the session already did, the agent can delegate to a specialised subagent instead of doing it inline.
 
 One design constraint we considered essential is that the model is not permitted to make claims about the state of the hardware in the absence of an actual result received from the device. If a command fails or is not yet implemented, the agent states this explicitly instead of producing a plausible but fabricated answer. Without this restriction, a conversational assistant applied to a technical domain could generate seemingly credible data — frequencies, card identifiers, protocols — that corresponds to no real measurement.
+
+The interaction takes place in a graphical application organised into two panels: the conversation and, permanently visible beside it, the agent's reasoning chain.
 
 ## Design philosophy
 
@@ -63,13 +63,13 @@ It is important to state precisely where this project's originality lies and whe
 
 The project's originality lies at a layer above these, marked in the same file under the `"layer": "agent"` label: operations that combine one or more device-level commands with reasoning performed by the language model, in order to produce an interpreted answer rather than just raw data. For example, instead of displaying a Sub-GHz protocol code, the agent can explain, in natural language, what type of device is likely the source of the signal; instead of listing NFC UIDs, it can build a summary of a monitoring session. This is the layer that, to the best of our knowledge, has no direct equivalent in the existing ecosystem of applications for the Flipper Zero.
 
-<<<<<<< HEAD
-O a doua contribuție, complementară celei de mai sus, este lanțul de raționament expus permanent utilizatorului. Aplicațiile conversaționale obișnuite arată doar întrebarea și răspunsul, iar drumul dintre ele rămâne ascuns; în cazul unui agent care acționează asupra hardware-ului, acest drum este tocmai partea care poate fi verificată. coFlipper afișează, pas cu pas și în timp real, raționamentele modelului alături de comenzile pe care acestea le-au motivat, cu argumentele și răspunsurile primite de la dispozitiv. Utilizatorul poate astfel urmări nu numai ce a răspuns agentul, ci și de ce a ales să facă tocmai acele măsurători — iar când o comandă eșuează, se vede exact ce a eșuat și în ce moment al raționamentului. Detaliile de implementare sunt documentate în desktop/README.md.
+Within that layer, the agent is not a single model answering questions. When a job needs many successive measurements, or when the question is about what the session has already done rather than about the present moment, the agent delegates it to a specialised subagent: a separate conversation with its own instruction, its own restricted set of tools and its own budget, which reports back with both a conclusion and the raw readings behind it. The analyst subagent is given no device tools at all, precisely so that a component that only reads cannot become the source of a measurement nobody took. Delegation is described in the same catalog as everything else, so a new specialist is a matter of description rather than of code.
 
-## Stadiul curent și limitări
-=======
+A second contribution, complementary to the one above, is the reasoning chain shown permanently to the user. Ordinary conversational applications display only the question and the answer, leaving the path between them hidden; in the case of an agent that acts upon hardware, that path is precisely the part that can be verified. coFlipper displays, step by step and in real time, the model's reasoning alongside the commands that reasoning motivated, with their arguments and the responses received from the device. The user can therefore follow not only what the agent answered, but why it chose to take those particular measurements — and when a command fails, it is visible exactly what failed and at which point in the reasoning.
+
+Delegation enters the same chain rather than hiding behind it. The moment a subagent is summoned, the chain announces who it is, what it is permitted to do and what it was asked; its own reasoning and commands appear nested one level deeper, in a different accent colour; and it ends by reporting back to the agent that summoned it. Without this, part of the answer would have been produced by a second model without the user ever learning of its existence. Implementation details are documented in desktop/README.md.
+
 ## Current status and limitations
->>>>>>> 68f3ae9d0fb859fc675335475bc395bf37f8ebcb
 
 The project was developed within the OPEN section of the InfoEducație 2026 national stage, in the time allotted to it. As a result, the implementation reflects an early stage — a working prototype — focused on validating the concept rather than exhaustively covering all Flipper Zero capabilities. Extending and consolidating the project remain natural directions for a possible continuation after the competition.
 

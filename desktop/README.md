@@ -41,7 +41,9 @@ The same functionality is available in the console as well, useful when debuggin
     python agent.py
     python agent.py --mock
 
-In `--mock` mode, commands do not reach a real device: they are served by a simulated Flipper that responds exactly like the firmware (`ping` and `info` succeed, the rest return `not_implemented`). This mode is useful for working on the agent side when the device is not at hand.
+In `--mock` mode, commands do not reach a real device: they are served by a simulated Flipper that responds like the firmware. The three commands the firmware implements — `ping`, `info` and `subghz.rssi` — succeed, and anything else returns `unknown_command`. The simulator also enforces the frequency bands the CC1101 transceiver can actually reach, so a frequency the hardware would refuse is refused here too. This mode is useful for working on the agent side when the device is not at hand.
+
+Two properties of the simulated measurements are deliberate. The level for a given frequency is derived from the frequency itself, so it is the same in every run and two test runs can be compared. But successive readings of the *same* frequency move slightly, by a fixed sequence of small amounts, because a real signal level never repeats exactly. The second property was added after a real run made its absence obvious: the scanner subagent judges by how much the values vary, and against a simulator returning one constant its entire line of reasoning was vacuous — we would have shipped a subagent whose premise had never been exercised without hardware.
 
 ### Signalling simulated mode
 
@@ -55,61 +57,112 @@ The solution has three components that complement one another:
 
 Without the first measure, the restriction in the instruction would have remained a mere recommendation, one the model had no way to apply: nothing in the data it received indicated that it was inside a simulation.
 
-<<<<<<< HEAD
-## Lanțul de raționament
+## The reasoning chain
 
-Între cererea utilizatorului și răspunsul final se află o succesiune de decizii: ce unealtă merită apelată, ce a răspuns dispozitivul, ce concluzie se poate trage din acel răspuns, dacă mai este nevoie de o altă măsurătoare. Aplicația păstrează această succesiune și o afișează pas cu pas, în ordinea în care s-a produs. Un tur poate conține mai multe runde de dialog cu modelul, iar fiecare rundă contribuie cu pași la lanț.
+Between the user's request and the final answer lies a succession of decisions: which tool is worth calling, what the device responded, what conclusion can be drawn from that response, whether another measurement is needed. The application keeps this succession and displays it step by step, in the order in which it happened. A turn may contain several rounds of dialogue with the model, and every round contributes steps to the chain.
 
-Un lanț tipic, exact în forma în care apare în panoul din dreapta:
+A typical chain, exactly as it appears in the right-hand panel:
 
-    CERERE: Verifica daca dispozitivul raspunde si masoara nivelul pe 433.92 MHz
+    REQUEST: Check whether the device responds and measure the level on 433.92 MHz
 
-    1. raționament
-       Cererea are doua parti. Verific mai intai daca dispozitivul raspunde,
-       fiindca o masuratoare pe un dispozitiv mut nu ar avea sens.
+    1. reasoning
+       The request has two parts. I first check whether the device responds,
+       because a measurement on a mute device would make no sense.
 
     2. ping
-       (fara argumente)
+       (no arguments)
        OK pong
 
-    3. raționament
-       Raspunde. Trec la masuratoare, pe frecventa cerută.
+    3. reasoning
+       It responds. I move on to the measurement, on the requested frequency.
 
     4. subghz_rssi
        frequency=433920000
        OK 433919809 -93.9
 
-    5. raționament
-       Nivelul e scazut, deci nu emite nimic puternic in apropiere.
+    5. reasoning
+       The level is low, so nothing powerful is transmitting nearby.
 
-    6. răspuns formulat (2.4 s)
+    6. answer phrased (2.4 s)
 
-Pașii de tip raționament nu sunt reconstituiți de noi din comenzile executate: ei sunt rezumatele propriului raționament, produse de model și cerute explicit prin `thinking_config`. Modelele care nu oferă astfel de rezumate rămân perfect utilizabile — lanțul conține în acel caz doar cererea, comenzile executate și răspunsul. Cererea poate fi dezactivată cu `COFLIPPER_THOUGHTS=0`.
+The reasoning steps are not reconstructed by us from the executed commands: they are summaries of the model's own reasoning, produced by the model and requested explicitly through `thinking_config`. Models that do not offer such summaries remain perfectly usable — the chain then contains only the request, the executed commands and the answer. The request can be disabled with `COFLIPPER_THOUGHTS=0`.
 
-Numărul de runde nu este fix și nici previzibil: la aceeași cerere, modelul a apelat într-o rulare ambele măsurători în aceeași rundă, iar în alta le-a împărțit în două runde succesive. Lanțul reflectă ce s-a întâmplat efectiv, nu un șablon prestabilit.
+The number of rounds is neither fixed nor predictable: for the same request, in one run the model called both measurements within the same round, and in another it split them across two successive rounds. The chain reflects what actually happened, not a predetermined template.
 
-O limitare pe care nu am reușit să o eliminăm complet: limba rezumatelor de raționament. Instrucțiunea de sistem cere modelului să raționeze în limba în care a primit cererea, iar în practică primul rezumat respectă de obicei cerința, dar cele ulterioare revin frecvent la engleză. Rezumatele nu sunt scrise direct de model, ci de un mecanism intern care îi condensează raționamentul, și acesta nu poate fi controlat din instrucțiune. Am preferat să lăsăm rezumatele așa cum sosesc, în loc să le traducem: o traducere ar consuma cereri suplimentare din cota zilnică și, mai important, ar interpune încă un pas între raționamentul real al modelului și ceea ce vede utilizatorul — exact ceea ce lanțul încearcă să evite.
+One limitation we could not eliminate entirely: the language of the reasoning summaries. The system instruction asks the model to reason in the language in which it received the request, and in practice the first summary usually obeys, but the later ones frequently revert to English. The summaries are not written directly by the model, but by an internal mechanism that condenses its reasoning, and that mechanism cannot be reached from the instruction. We preferred to leave the summaries as they arrive rather than translate them: a translation would consume additional requests from the daily quota and, more importantly, would interpose one more step between the model's real reasoning and what the user sees — precisely what the chain is trying to avoid.
 
-Marcajele Markdown au fost o problemă practică înrudită. Modelul răspunde implicit cu asteriscuri, accente grave și titluri, pe care fereastra le afișează literal, ca semne de punctuație fără rost. Soluția are două părți: instrucțiunea de sistem cere text simplu, iar afișajul curăță marcajele rămase, întrucât modelul respectă cerința doar în cea mai mare parte.
+Markdown markup was a related practical problem. By default the model answers with asterisks, backticks and headings, which the window displays literally, as pointless punctuation. The solution has two parts: the system instruction asks for plain text, and the display cleans up the remaining markup, since the model obeys the request only for the most part.
 
-O consecință a acestei separări merită menționată: rezumatele de raționament sunt notițe interne ale modelului și nu au ce să caute în răspunsul adresat utilizatorului. Din acest motiv textul răspunsului este reconstruit din fragmentele care nu sunt marcate ca raționament, în loc să fie preluat direct din câmpul `text` al răspunsului, care le-ar include și pe ele.
+One consequence of this separation deserves mention: the reasoning summaries are the model's internal notes and have no place in the answer addressed to the user. For this reason the answer text is rebuilt from the fragments that are not marked as reasoning, instead of being taken directly from the response's `text` field, which would include them as well.
 
-Motivul pentru care lanțul este afișat permanent, și nu ascuns într-un jurnal de depanare, este același care a stat la baza restricției de a nu inventa date: un agent care formulează fraze în limbaj natural sună la fel de convingător și când a măsurat ceva, și când doar presupune. Lanțul arată concret pe ce se sprijină fiecare afirmație — iar când o comandă eșuează, se vede exact ce a eșuat și în ce moment. Răspunsul final încetează astfel să fie un verdict și devine încheierea unui drum pe care utilizatorul îl poate parcurge și verifica.
+The reason the chain is displayed permanently, rather than hidden in a debugging log, is the same one behind the restriction against inventing data: an agent that phrases sentences in natural language sounds equally convincing whether it measured something or merely assumed it. The chain shows concretely what each statement rests on — and when a command fails, it is visible exactly what failed and at which moment. The final answer thus stops being a verdict and becomes the conclusion of a path the user can walk through and verify.
 
-## Interfața grafică
+## Subagents
 
-Fereastra este împărțită în două panouri: în stânga conversația propriu-zisă, în dreapta lanțul de raționament descris mai sus. Bara de sus arată starea conexiunii (verde pentru conectat, roșu pentru eroare), portul serial folosit și modelul de limbaj activ.
+Not every job fits comfortably inside the main conversation. Two cases came up often enough to be worth handling separately.
 
-Cât timp agentul lucrează, bara de stare urmărește lanțul: arată dacă modelul raționează în acel moment sau execută o anumită comandă pe dispozitiv, nu doar faptul că este ocupat.
-=======
+The first is long work. Measuring one frequency is a single command, but establishing whether anything is actually *transmitting* on it is not: a single reading cannot tell an empty frequency from a transmitter that happens to be silent at that instant. It takes several readings, spaced out, and a judgement over the whole set. Done inline, those readings pile up in the main conversation — every round carries the entire history to the model again, the context grows, and the user watches a window that appears to be doing nothing.
+
+The second is research over material already gathered. Every command the session has executed on the device is recorded in a log, and questions about it ("what have we measured so far?", "which commands failed?") need no hardware access at all, only reading.
+
+So the agent can delegate. A subagent is a separate conversation with the model: its own system instruction, its own tool list, its own round budget. It carries out one bounded task and reports back to the agent that summoned it. Two exist:
+
+| Subagent | Role | Tools |
+|---|---|---|
+| scanner | measures the radio spectrum over several successive readings | `ping`, `info`, `subghz.rssi` |
+| analyst | researches the session log | none |
+
+The analyst having no tools at all is deliberate, not an omission. A subagent that can only read cannot disturb the radio, and it cannot be the source of a fabricated measurement either: everything it says has to be traceable to a line of the log it was given.
+
+Delegation is described in `commands.json` like everything else, under `"layer": "agent"`, with a `subagent` field naming the specialist and a `task` field phrasing the job in words. The catalog therefore remains the single source of truth: adding a delegated capability means describing it there, not changing the agent's code.
+
+### What the interface shows
+
+Delegation must not pass unnoticed. If only the result appeared in the chain, the user would have no way of knowing that part of the answer was produced by a second model, with different tools and a different instruction. So the moment a subagent is summoned, the chain announces who it is — its role, the model it runs on, the tools it is permitted, its round budget — and the task it was given, including the arguments the main agent chose. Its own reasoning and commands then appear nested one level deeper, each carrying its author's name, and it ends by reporting back:
+
+    2. subagent summoned: scanner
+       role: measures the radio spectrum on the device, over several successive readings
+       model: gemini-3.5-flash
+       permitted tools: ping, info, subghz_rssi
+       budget: at most 6 rounds
+       task received:
+          Establish whether there is real radio activity on the requested frequency...
+          Parameters given by the main agent: frequency: 433920000, readings: 2
+
+       scanner · reasoning
+          First reading on the requested frequency.
+
+       scanner · subghz_rssi
+          frequency=433920000
+          OK 433919809 -93.9
+
+       scanner · reports to the main agent (2 readings, 3 rounds)
+          Two identical readings of -93.9 dBm. Below -90 dBm means background noise.
+
+Subagent steps are drawn in a second accent colour, so the change of author is visible without reading. Only the main agent's steps are numbered: numbering follows *its* decisions, and a subagent may take any number of steps inside a single one of them.
+
+### The report, and why it carries the raw data
+
+The report handed back is not prose alone. It travels together with the evidence behind it — every command the subagent ran, with its arguments and the device's answer — and the main agent is instructed that if the two disagree, the readings win. Without this, delegation would introduce exactly the weakness the project set out to avoid: a claim about the hardware that nothing in the data supports, this time laundered through a second model.
+
+### Cost, and the round budget
+
+Subagents consume requests from the daily quota exactly like the main agent, and a delegated turn can easily cost twice what an inline one would. Two mechanisms keep that bounded.
+
+The first is a round budget per subagent. When it is spent, the subagent is not cut off but asked to report on the basis of what it already has, so the work is not wasted. Should it ignore that order and call another tool anyway, it is stopped there — testing this revealed a real defect in the first implementation, which kept re-issuing the request and would have burned the whole daily quota on a single stubborn subagent. If it never produces a conclusion, the report says so explicitly rather than arriving empty, which the main agent could otherwise mistake for "nothing found".
+
+The second is the choice of model. The free-tier quota is counted separately per model, so pointing the subagents at a different one gives them their own allowance instead of competing with the conversation:
+
+    set COFLIPPER_SUBAGENT_MODEL=gemini-3.5-flash-lite
+    python gui.py
+
+Subagents run one at a time, deliberately. Running them in parallel would buy little here — there is a single radio in the device, so measurements have to be serialised anyway — while multiplying the risk of hitting the per-minute rate limit. The device access they do share is guarded by a lock, since a single serial port serves the Flipper and two overlapping requests would desynchronise the protocol, matching responses to the wrong command.
+
 ## The graphical interface
 
-The window is split into two panels. On the left is the conversation proper, on the right the list of commands actually sent to the Flipper Zero, with their arguments and responses.
+The window is split into two panels: on the left the conversation proper, on the right the reasoning chain described above. The top bar carries the project name and the active language model; the connection status (green for connected, red for error, yellow for simulated mode), the serial port in use and the available tools live in the device card below it.
 
-This second area is not a simple debugging log, but a design decision: an agent that phrases answers in natural language risks appearing to know things it has not measured. By permanently displaying the commands executed on the device, the user can check whether the agent's statements are backed by real data — and, in the case of an error returned by the hardware, sees exactly what failed.
-
-The top bar shows the connection status (green for connected, red for error), the serial port in use and the active language model.
->>>>>>> 68f3ae9d0fb859fc675335475bc395bf37f8ebcb
+While the agent is working, the status bar follows the chain: it shows whether the model is reasoning at that moment or executing a particular command on the device, not merely the fact that it is busy.
 
 ## Bringing up the connection
 
@@ -143,27 +196,20 @@ It can also be used as a module, which is how `agent.py` obtains its client:
 
 | File | Role |
 |---|---|
-<<<<<<< HEAD
-| gui.py | aplicația cu interfață grafică (Tkinter) |
-| agent.py | nucleul agentului: bucla de conversație și orchestrarea apelurilor de unelte |
-| reasoning.py | lanțul de raționament: pașii unui tur, în ordinea în care s-au produs |
-| commands.py | conversia catalogului commands.json în unelte Gemini și dispecerizarea apelurilor |
-| protocol.py | implementarea clientului CFP peste portul serial |
-| cfp_client.py | consolă pentru trimiterea manuală de comenzi CFP, fără model de limbaj |
-| mock_flipper.py | Flipper simulat, cu aceeași interfață ca clientul real |
-| test_gemini.py | verificare minimală a conexiunii la API-ul Gemini |
-| list_models.py | listează modelele disponibile pentru cheia configurată |
-=======
 | gui.py | the graphical application (Tkinter) |
 | agent.py | the agent proper: the conversation loop and orchestration of tool calls |
+| reasoning.py | the reasoning chain: the steps of a turn, in the order they happened |
+| subagents.py | the subagents: specialised assistants the main agent delegates to |
 | commands.py | conversion of the commands.json catalog into Gemini tools, and dispatching of calls |
 | device.py | the device connection used by the interface, on a background thread |
 | protocol.py | implementation of the CFP client over the serial port |
 | cfp_client.py | connection setup (port detection + launching the application) and a console for sending CFP commands manually, without a language model |
 | mock_flipper.py | a simulated Flipper, with the same interface as the real client |
+| scripted_model.py | a scripted stand-in for the model, so the tests need no API requests |
+| test_reasoning.py | checks the construction of the reasoning chain |
+| test_subagents.py | checks delegation, the session log and the round budget |
 | test_gemini.py | a minimal check of the connection to the Gemini API |
 | list_models.py | lists the models available to the configured key |
->>>>>>> 68f3ae9d0fb859fc675335475bc395bf37f8ebcb
 
 ## Verification status
 
@@ -176,14 +222,21 @@ Scenarios verified on the physical device:
 - comparing two frequencies, with the agent deciding on its own to perform two successive measurements and formulate a conclusion;
 - requesting a physically impossible frequency (2.4 GHz), in which case the agent reported the error returned by the device and correctly explained the hardware limitation, without inventing a measurement.
 
-<<<<<<< HEAD
-Interfața grafică a fost verificată separat, cu dispozitivul simulat: conectare, activarea corectă a controalelor, trimiterea unei cereri, afișarea comenzilor executate și a răspunsului final, precum și tratarea erorilor fără blocarea ferestrei.
-
-Construirea lanțului de raționament a fost verificată cu modelul înlocuit printr-un set fix de răspunsuri, ceea ce permite verificarea repetată fără a consuma cota zilnică de cereri: ordinea pașilor pe mai multe runde, faptul că fiecare pas ajunge imediat la afișaj, separarea rezumatelor de raționament de textul răspunsului, marcarea rezultatelor simulate, un tur în care comanda eșuează și cazul unui model care nu produce rezumate de raționament.
-
-Faptul că modelul real întoarce efectiv rezumate de raționament atunci când folosește și unelte a fost confirmat separat, cu API-ul Gemini: la cererea de a compara nivelul de semnal de pe două frecvențe, agentul a raționat, a efectuat cele două măsurători și a formulat concluzia, iar lanțul a cuprins toți pașii în ordine. Această verificare nu poate fi înlocuită de cea cu răspunsuri fixe, fiindcă exact aici se afla incertitudinea: dacă modelul acceptă cererea de rezumate simultan cu apelarea uneltelor.
-
-Simulatorul reproduce și `subghz.rssi`, cu aceleași benzi de frecvență pe care le acceptă emițătorul-receptor CC1101 al dispozitivului. Fără această restricție, agentul ar fi fost dezvoltat împotriva unui dispozitiv mai permisiv decât cel real, iar o frecvență respinsă de hardware ar fi trecut neobservată în timpul dezvoltării.
-=======
 The graphical interface was verified separately, with the simulated device: connecting, correct enabling of the controls, sending a request, displaying the executed commands and the final response, as well as handling errors without freezing the window.
->>>>>>> 68f3ae9d0fb859fc675335475bc395bf37f8ebcb
+
+Two test suites cover the parts that can be checked without hardware and without the API. Both run in under a second and can be repeated freely, since the model is replaced by a scripted set of responses:
+
+    python test_reasoning.py     # 22 checks
+    python test_subagents.py     # 38 checks
+
+`test_reasoning.py` covers the order of the steps across several rounds, the fact that every step reaches the display immediately, the separation of reasoning summaries from the answer text, the marking of simulated results, a turn in which the command fails, the case of a model that produces no reasoning summaries, and the cleaning up of Markdown markup.
+
+`test_subagents.py` covers a full delegation: what is announced when a subagent is summoned, the nesting and attribution of its steps, the fact that the analyst receives the session log and no tools, the report and the raw evidence handed back, the refusal of a subagent's attempt to summon another subagent, and the round budget — both when the subagent complies with the order to report and when it ignores it. Two further checks guard the edges: a session with no subagent runner attached must still execute device commands normally, and twelve commands issued from twelve threads at once must reach the device one at a time. That last one is not hypothetical — in a real run the scanner asked for five readings within a single round, and the model is free to do so.
+
+The suites are worth more than the count of checks suggests: writing them found two real defects. The round budget originally kept re-issuing its request to a subagent that ignored it, which would have consumed the whole daily quota on a single stubborn subagent; and one test double initially let reasoning text leak into the response's `text` field, which sent us to read the SDK's own implementation and confirm that it skips reasoning parts — the behaviour our answer-rebuilding relies on.
+
+That the real model does return reasoning summaries while also using tools was confirmed separately, against the Gemini API: asked to compare the signal level on two frequencies, the agent reasoned, performed the two measurements and formulated the conclusion, and the chain contained every step in order. This check cannot be replaced by the one with fixed responses, because the uncertainty lay precisely here: whether the model accepts the request for summaries at the same time as tool calling.
+
+Delegation was confirmed the same way, and for the same reason: a scripted model cannot show whether a real one *chooses* to delegate. Asked whether there was real activity on 433.92 MHz — with the request stating explicitly that a single instantaneous reading was not what was wanted — the main agent summoned the scanner of its own accord rather than calling `subghz.rssi` itself. The scanner checked the device with `info`, took five readings, reported back that all five sat at -93.9 dBm with no variation, and the main agent phrased the conclusion from that report while stating that the data came from a simulator. The whole turn took 22 seconds, which is itself the argument for delegating work of this kind rather than running it inside the conversation.
+
+The simulator reproduces `subghz.rssi` as well, with the same frequency bands the device's CC1101 transceiver accepts. Without that restriction, the agent would have been developed against a device more permissive than the real one, and a frequency rejected by the hardware would have gone unnoticed during development.

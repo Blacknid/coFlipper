@@ -1,17 +1,17 @@
-"""Interfata grafica a agentului coFlipper.
+"""The graphical interface of the coFlipper agent.
 
-Aceeasi functionalitate ca agent.py, dar intr-o fereastra: conversatia in stanga,
-lantul de raționament in dreapta - gandurile modelului si comenzile trimise efectiv
-catre Flipper Zero, in ordinea in care s-au produs. Astfel raspunsul final nu apare ca
-un verdict, ci ca incheierea unui drum pe care utilizatorul il poate urmari.
+The same functionality as agent.py, but inside a window: the conversation on the left,
+the reasoning chain on the right - the model's thoughts and the commands actually sent
+to the Flipper Zero, in the order in which they happened. That way the final answer does
+not show up as a verdict, but as the end of a path the user was able to follow.
 
-Aspectul urmeaza limbajul vizual al aplicatiei oficiale qFlipper: fundal foarte
-intunecat, portocaliul Flipper ca singura culoare de accent, panouri plate cu contur
-subtil si un card de dispozitiv in partea de sus.
+The look follows the visual language of the official qFlipper application: a very dark
+background, the Flipper orange as the only accent color, flat panels with a thin outline
+and a device card across the top.
 
-Rulare:
-    python gui.py           # cu Flipper conectat prin USB
-    python gui.py --mock    # fara dispozitiv, pentru dezvoltare
+Running it:
+    python gui.py           # with a Flipper connected over USB
+    python gui.py --mock    # without a device, for development
 """
 
 import argparse
@@ -28,11 +28,12 @@ from tkinter import ttk
 from dotenv import load_dotenv
 
 from agent import MODEL, build_chat, run_turn
-from commands import CommandDispatcher, device_commands, load_catalog
-from reasoning import ANSWER, REQUEST, THOUGHT, TOOL, plain_text
+from commands import CommandDispatcher, load_catalog, model_commands
+from reasoning import ANSWER, REPORT, REQUEST, SPAWN, THOUGHT, TOOL, plain_text
+from subagents import SubagentRunner
 
-# Paleta qFlipper: fundal aproape negru, un singur accent portocaliu (#FF8200 este
-# portocaliul din identitatea Flipper Zero), restul in tonuri de gri.
+# The qFlipper palette: an almost black background, a single orange accent (#FF8200 is
+# the orange from the Flipper Zero identity), everything else in shades of gray.
 BG = "#141518"
 BG_CARD = "#1D1E22"
 BG_PANEL = "#1A1B1F"
@@ -45,18 +46,22 @@ ORANGE_DARK = "#D96E00"
 OK_GREEN = "#5FBF7F"
 ERR_RED = "#E06C6C"
 WARN_YELLOW = "#E0B84C"
+# A second accent, used exclusively for subagents. The orange stays with the main agent,
+# so delegation stands out at a glance, without having to read anything.
+CYAN = "#4FB8C4"
 
-# Cat de des se verifica prezenta dispozitivului. Verificarea inseamna doar citirea
-# listei de porturi seriale, deci un interval scurt nu incarca sistemul.
+# How often the presence of the device is checked. Checking means no more than reading
+# the list of serial ports, so a short interval does not load the system.
 DEVICE_POLL_S = 1.5
 
-# Numarul pasului ocupa primul rand; restul textului se aliniaza sub el.
+# The step number takes up the first line; the rest of the text lines up underneath it.
 STEP_INDENT = "   "
 
 
-def _indent(text):
-    """Aliniaza un rezumat de raționament, care poate avea mai multe paragrafe."""
-    return "\n".join(STEP_INDENT + line if line else "" for line in text.splitlines())
+def _indent(text, level=1):
+    """Indents a text that may span several paragraphs to the given depth."""
+    pad = STEP_INDENT * level
+    return "\n".join(pad + line if line else "" for line in text.splitlines())
 
 
 class CoFlipperWindow:
@@ -70,10 +75,10 @@ class CoFlipperWindow:
         self.flipper = None
         self.busy = False
         self.closing = False
-        # Starea afisata cand agentul nu lucreaza, actualizata de firul de supraveghere.
+        # The status shown while the agent is idle, kept up to date by the monitor thread.
         self.ready_status = "se conecteaza..."
         self.ready_color = FG_DIM
-        # Numerotarea pasilor reporneste la fiecare cerere: lantul se citeste pe turul curent.
+        # Step numbering restarts with every request: the chain is read per current turn.
         self.step_no = 0
         self.chain_used = False
 
@@ -84,22 +89,22 @@ class CoFlipperWindow:
         self._build_fonts()
         self._build_styles()
         self._build_layout()
-        # Geometria se fixeaza dupa construirea widgeturilor: altfel fereastra se
-        # redimensioneaza singura ca sa incapa continutul si depaseste marginea ecranului.
+        # The geometry is fixed after the widgets are built: otherwise the window resizes
+        # itself to fit the content and ends up running past the edge of the screen.
         self._center_window(1020, 660)
 
         root.after(100, self._drain_events)
-        # Conectarea deschide portul serial si contacteaza API-ul, deci se face pe un
-        # fir separat: altfel fereastra ar aparea blocata pana la finalizarea ei.
+        # Connecting opens the serial port and contacts the API, so it happens on a
+        # separate thread: otherwise the window would look frozen until it finished.
         threading.Thread(target=self._connect, daemon=True).start()
 
-    # ---------------------------------------------------------------- interfata
+    # ---------------------------------------------------------------- interface
 
     def _center_window(self, width, height):
-        """Asaza fereastra in centru, fara sa depaseasca ecranul.
+        """Places the window in the center, without letting it run off the screen.
 
-        Dimensiunea dorita se reduce daca ecranul e mai mic: altfel, pe ecrane cu
-        scalare mare, bara de scriere ar ajunge sub marginea de jos si ar fi inutilizabila.
+        The desired size shrinks if the screen is smaller: otherwise, on screens with
+        heavy scaling, the input bar would end up below the bottom edge and be unusable.
         """
         self.root.update_idletasks()
         screen_w = self.root.winfo_screenwidth()
@@ -117,17 +122,17 @@ class CoFlipperWindow:
         self.font_bold = tkfont.Font(family="Segoe UI", size=11, weight="bold")
         self.font_device = tkfont.Font(family="Segoe UI Semibold", size=15)
         self.font_brand = tkfont.Font(family="Segoe UI", size=13, weight="bold")
-        # Cascadia Code vine cu Windows Terminal si arata mai bine decat Consolas
-        # in panoul de comenzi; daca lipseste, Tk cade automat pe un font monospatiat.
+        # Cascadia Code ships with Windows Terminal and looks better than Consolas in the
+        # command panel; if it is missing, Tk falls back to a monospaced font on its own.
         self.font_mono = tkfont.Font(family="Cascadia Code", size=9)
         self.font_label = tkfont.Font(family="Segoe UI", size=8, weight="bold")
-        # Gandurile modelului sunt proza, nu comenzi: font proportional si inclinat, ca
-        # sa se distinga la prima vedere de liniile monospatiate ale dispozitivului.
+        # The model's thoughts are prose, not commands: a proportional, slanted font, so
+        # that they are told apart at first sight from the device's monospaced lines.
         self.font_thought = tkfont.Font(family="Segoe UI", size=9, slant="italic")
         self.font_step = tkfont.Font(family="Segoe UI", size=8, weight="bold")
 
     def _build_styles(self):
-        """Bara de derulare implicita e cea a sistemului si strica tema intunecata."""
+        """The default scrollbar is the system's own and it ruins the dark theme."""
         style = ttk.Style()
         style.theme_use("clam")
         style.configure(
@@ -219,8 +224,8 @@ class CoFlipperWindow:
         self.transcript.tag_configure("error", foreground=ERR_RED, font=self.font_ui)
         self.transcript.tag_configure("warning", foreground=WARN_YELLOW, font=self.font_bold)
 
-        # Incadrarea cuvintelor e necesara aici: pe langa comenzi, panoul afiseaza si
-        # gandurile modelului, care sunt fraze intregi.
+        # Word wrapping is needed here: besides the commands, the panel also shows the
+        # model's thoughts, which are whole sentences.
         self.chain = self._make_text(panels, self.font_mono, "word", column=1, padx=(14, 0))
         self.chain.tag_configure("head", foreground=ORANGE, font=self.font_step, spacing3=6)
         self.chain.tag_configure("num", foreground=FG_FAINT, font=self.font_step)
@@ -231,6 +236,12 @@ class CoFlipperWindow:
         self.chain.tag_configure("err", foreground=ERR_RED)
         self.chain.tag_configure("dim", foreground=FG_FAINT)
         self.chain.tag_configure("warn", foreground=WARN_YELLOW)
+        # Delegation gets a color of its own: summoning a subagent and the report it comes
+        # back with are the moments where the chain changes author.
+        self.chain.tag_configure("spawn", foreground=CYAN, font=self.font_step)
+        self.chain.tag_configure("report", foreground=CYAN, font=self.font_step)
+        self.chain.tag_configure("agentname", foreground=CYAN, font=self.font_small)
+        self.chain.tag_configure("task", foreground=FG_DIM, font=self.font_thought)
 
     def _panel_label(self, parent, text, column, padx=0):
         tk.Label(
@@ -238,7 +249,7 @@ class CoFlipperWindow:
         ).grid(row=0, column=column, sticky="ew", padx=padx, pady=(0, 7))
 
     def _make_text(self, parent, font, wrap, column, padx=0):
-        """Zona de text cu bara de derulare, asezata in grila panoului. Returneaza textul."""
+        """A text area with a scrollbar, placed in the panel grid. Returns the text."""
         frame = tk.Frame(
             parent, bg=BG_PANEL, highlightthickness=1, highlightbackground=BORDER
         )
@@ -323,7 +334,7 @@ class CoFlipperWindow:
             return
         self.send_button.configure(bg=ORANGE_DARK if hovering else ORANGE)
 
-    # ------------------------------------------------------------- randare text
+    # ----------------------------------------------------------- text rendering
 
     def _append(self, widget, text, tag=None):
         widget.configure(state="normal")
@@ -342,13 +353,13 @@ class CoFlipperWindow:
         if enabled:
             self.entry.focus_set()
 
-    # ------------------------------------------------------------------ evenimente
+    # ------------------------------------------------------------------- events
 
     def _drain_events(self):
-        """Singurul loc din care se modifica interfata.
+        """The only place from which the interface is modified.
 
-        Tkinter nu poate fi apelat din alt fir de executie, deci firele de lucru doar
-        pun evenimente in coada, iar bucla principala le consuma periodic.
+        Tkinter cannot be called from another thread of execution, so the worker threads
+        only put events on the queue, and the main loop consumes them periodically.
         """
         try:
             while True:
@@ -364,12 +375,18 @@ class CoFlipperWindow:
 
     def _on_event_ready(self, payload):
         simulated = payload["simulated"]
-        # Galben, nu verde: modul simulat nu trebuie sa arate ca o conexiune reala.
-        # In modul real starea ramane neutra pana cand firul de supraveghere o stabileste.
+        # Yellow, not green: simulated mode must not look like a real connection.
+        # In real mode the status stays neutral until the monitor thread settles it.
         self.ready_status = payload["status"]
         self.ready_color = WARN_YELLOW if simulated else FG_DIM
         self._set_status(self.ready_status, self.ready_color)
-        self.tools_label.configure(text="  ".join(payload["tools"]))
+        # A compact summary, not the full list: the count and category groups on one line,
+        # the subagents on another. They are two different kinds of capability, and mixing
+        # them would suggest that delegation is also a CFP command.
+        summary = f"{payload['tool_count']} comenzi · {', '.join(payload['categories'])}"
+        if payload.get("subagents"):
+            summary += "\nsubagenți: " + ", ".join(payload["subagents"])
+        self.tools_label.configure(text=summary)
 
         if simulated:
             self._append(
@@ -390,8 +407,8 @@ class CoFlipperWindow:
 
     def _on_event_agent(self, payload):
         self._append(self.transcript, "Agent\n", "speaker")
-        # Instructiunea de sistem cere text simplu, dar modelul mai strecoara marcaje
-        # Markdown; aici sunt cele care ar aparea ca semne fara rost in fereastra.
+        # The system instruction asks for plain text, but the model still slips in Markdown
+        # markup; these are the ones that would show up as pointless signs in the window.
         self._append(self.transcript, plain_text(payload) + "\n\n", "agent")
         self._set_status(self.ready_status, self.ready_color)
         self._set_input_enabled(True)
@@ -424,16 +441,20 @@ class CoFlipperWindow:
                 "warning",
             )
 
-        # Starea nu se suprascrie cat timp un tur e in desfasurare: acolo bara arata
-        # ca agentul lucreaza, iar starea corecta se aplica la finalul turului.
+        # The status is not overwritten while a turn is under way: there the bar shows that
+        # the agent is working, and the correct status is applied at the end of the turn.
         if not self.busy:
             self._set_status(self.ready_status, self.ready_color)
 
     def _on_event_step(self, step):
-        """Un pas din lantul de raționament, adaugat in panoul din dreapta.
+        """One step of the reasoning chain, appended to the panel on the right.
 
-        Bara de stare urmareste acelasi lant: cat timp agentul lucreaza, ea arata la ce
-        anume lucreaza in acel moment, nu doar faptul ca e ocupat.
+        The status bar follows the same chain: while the agent is working, it shows what
+        exactly it is working on at that moment, not merely the fact that it is busy.
+
+        A subagent's steps (depth > 0) are written indented and carrying its name: the
+        reader has to be able to see immediately what the main agent did and what was
+        delegated to somebody else.
         """
         if step.kind == REQUEST:
             self.step_no = 0
@@ -443,25 +464,78 @@ class CoFlipperWindow:
             self._append(self.chain, f"CERERE: {step.text}\n\n", "head")
             return
 
-        self.step_no += 1
-        self._append(self.chain, f"{self.step_no}. ", "num")
+        pad = STEP_INDENT * step.depth
+        if step.depth:
+            # Delegated steps are not numbered: the numbering follows the main agent's
+            # decisions, and a subagent may take any number of steps inside a single one
+            # of those decisions.
+            self._append(self.chain, f"{pad}{step.source or 'subagent'} · ", "agentname")
+        else:
+            self.step_no += 1
+            self._append(self.chain, f"{self.step_no}. ", "num")
 
         if step.kind == THOUGHT:
             self._append(self.chain, "raționament\n", "label")
-            self._append(self.chain, _indent(step.text) + "\n\n", "thought")
+            self._append(self.chain, _indent(step.text, step.depth + 1) + "\n\n", "thought")
             self._set_status("raționează...", ORANGE)
         elif step.kind == TOOL:
             self._append(self.chain, f"{step.name}\n", "call")
-            self._append(self.chain, f"{STEP_INDENT}{step.arg_line() or '(fara argumente)'}\n", "dim")
-            self._append(self.chain, f"{STEP_INDENT}{step.result_line()}\n", "ok" if step.ok else "err")
+            self._append(
+                self.chain,
+                f"{pad}{STEP_INDENT}{step.arg_line() or '(fara argumente)'}\n",
+                "dim",
+            )
+            self._append(
+                self.chain,
+                f"{pad}{STEP_INDENT}{step.result_line()}\n",
+                "ok" if step.ok else "err",
+            )
             if step.simulated:
-                self._append(self.chain, f"{STEP_INDENT}(rezultat simulat)\n", "warn")
+                self._append(self.chain, f"{pad}{STEP_INDENT}(rezultat simulat)\n", "warn")
             self._append(self.chain, "\n")
             self._set_status(f"execută {step.name}...", ORANGE)
+        elif step.kind == SPAWN:
+            self._on_spawn(step)
+        elif step.kind == REPORT:
+            self._on_report(step)
         elif step.kind == ANSWER:
             self._append(self.chain, f"răspuns formulat ({step.at_s:.1f} s)\n", "label")
 
-    # ------------------------------------------------------------- fire de lucru
+    def _on_spawn(self, step):
+        """Announces the summoning of a subagent: who it is, what it can do, what was asked.
+
+        Delegation must not pass unnoticed. If only the result appeared in the chain, the
+        user would have no way of knowing that a part of the answer was produced by a
+        second model, with different tools and a different instruction.
+        """
+        meta = step.meta
+        tools = ", ".join(meta.get("tools") or []) or "niciuna (fara acces la dispozitiv)"
+        self._append(self.chain, f"subagent convocat: {step.name}\n", "spawn")
+        self._append(self.chain, f"{STEP_INDENT}rol: {meta.get('role', '—')}\n", "dim")
+        self._append(self.chain, f"{STEP_INDENT}model: {meta.get('model', '—')}\n", "dim")
+        self._append(self.chain, f"{STEP_INDENT}unelte permise: {tools}\n", "dim")
+        self._append(
+            self.chain,
+            f"{STEP_INDENT}buget: maximum {meta.get('max_rounds', '—')} runde\n",
+            "dim",
+        )
+        self._append(self.chain, f"{STEP_INDENT}sarcina primită:\n", "dim")
+        # The task has several paragraphs (the description from the catalog, then the
+        # arguments chosen by the main agent), so all of it is indented, not just line one.
+        self._append(self.chain, _indent(step.text, 2) + "\n\n", "task")
+        self._set_status(f"{step.name} lucrează...", ORANGE)
+
+    def _on_report(self, step):
+        """The report with which the subagent comes back to the main agent."""
+        meta = step.meta
+        detail = f"{meta.get('commands', 0)} comenzi, {meta.get('rounds', 0)} runde"
+        if meta.get("truncated"):
+            detail += ", buget epuizat"
+        self._append(self.chain, f"raportează agentului principal ({detail})\n", "report")
+        self._append(self.chain, _indent(step.text, step.depth + 1) + "\n\n", "thought")
+        self._set_status("agentul principal preia raportul...", ORANGE)
+
+    # ----------------------------------------------------------- worker threads
 
     def _connect(self):
         load_dotenv()
@@ -476,7 +550,7 @@ class CoFlipperWindow:
             )
             return
 
-        commands = device_commands(load_catalog())
+        commands = model_commands(load_catalog())
         if not commands:
             self._emit(
                 "fatal",
@@ -497,7 +571,10 @@ class CoFlipperWindow:
                 status = "se caută dispozitivul..."
 
             self.dispatcher = CommandDispatcher(commands, self.flipper)
-            # Clientul se pastreaza ca atribut, nu ca variabila locala: vezi build_chat.
+            self.dispatcher.subagents = SubagentRunner(
+                api_key, self.dispatcher, self.dispatcher.simulated
+            )
+            # The client is kept as an attribute, not a local variable: see build_chat.
             self.genai_client, self.chat = build_chat(
                 api_key, commands, self.dispatcher.simulated
             )
@@ -505,11 +582,19 @@ class CoFlipperWindow:
             self._emit("fatal", {"status": "eroare la pornire", "message": str(exc)})
             return
 
+        device = [c for c in commands if c.get("layer") == "device"]
         self._emit(
             "ready",
             {
                 "status": status,
-                "tools": [c["name"] for c in commands],
+                # A count and the category groups, not the full list: the catalog holds
+                # dozens of commands, and naming every one turned the card into an
+                # unreadable strip that ran off the window.
+                "tool_count": len(device),
+                "categories": sorted({c.get("category", "other") for c in device}),
+                "subagents": sorted(
+                    {c["subagent"] for c in commands if c.get("layer") == "agent"}
+                ),
                 "simulated": self.dispatcher.simulated,
             },
         )
@@ -518,7 +603,7 @@ class CoFlipperWindow:
             threading.Thread(target=self._monitor_device, daemon=True).start()
 
     def _monitor_device(self):
-        """Urmareste conectarea si deconectarea dispozitivului cat timp aplicatia ruleaza."""
+        """Watches the device being plugged in and out for as long as the app is running."""
         while not self.closing:
             state = self.flipper.poll()
             if state:
@@ -549,13 +634,13 @@ class CoFlipperWindow:
             )
             self._emit("agent", reply or "(raspuns gol)")
         except SystemExit as exc:
-            # send_with_retry iese cu sys.exit cand modelul nu e disponibil pe planul curent.
+            # send_with_retry exits via sys.exit when the model is unavailable on the plan.
             self._emit("error", str(exc))
         except Exception as exc:
             self._emit("error", f"{type(exc).__name__}: {exc}")
 
     def close(self):
-        self.closing = True  # opreste firul de supraveghere a dispozitivului
+        self.closing = True  # stops the thread that monitors the device
         if self.flipper:
             try:
                 self.flipper.close()
@@ -564,7 +649,7 @@ class CoFlipperWindow:
 
 
 def enable_dpi_awareness():
-    """Fara asta, Windows scaleaza fereastra ca pe o imagine si textul apare neclar."""
+    """Without this, Windows scales the window like an image and the text looks blurry."""
     if sys.platform != "win32":
         return
     try:
