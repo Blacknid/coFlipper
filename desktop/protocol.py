@@ -64,13 +64,39 @@ class CFPClient:
     def request(self, cmd, *args):
         request_id = next(self._ids)
         self._serial.write(encode_frame(request_id, cmd, args))
+        # Most commands answer within the default timeout, but subghz.read deliberately blocks
+        # on the radio for its whole listening window (timeout_ms, the second argument) before
+        # answering - a single long read is how the watcher waits for a signal without leaking
+        # memory in a tight loop (see the firmware's CFP_READ_MAX_MS note). So the client has to
+        # wait out that window plus a margin, or it would give up on a read that is working
+        # exactly as intended. We enforce it as a wall-clock deadline across the readline loop.
+        deadline = time.monotonic() + self._deadline_for(cmd, args)
         while True:
             line = self._serial.readline()
             if not line:
-                raise CFPError(f"timeout: no response to '{cmd}'")
+                if time.monotonic() >= deadline:
+                    raise CFPError(f"timeout: no response to '{cmd}'")
+                continue
             reply = decode_frame(line)
             if reply is None or reply["id"] != request_id:
                 continue
             if reply["status"] == "ERR":
                 raise CFPError(" ".join(reply["data"]) or "unknown error")
             return reply["data"]
+
+    def _deadline_for(self, cmd, args):
+        """Seconds to wait for this command's reply. The Sub-GHz read commands block on the
+        radio for their whole listening window (a timeout_ms argument, defaulting to 3 s on
+        the firmware) before answering, so we wait that window plus a 2 s margin; everything
+        else uses the default timeout. The window is a different positional argument per
+        command: subghz.read is 'freq [timeout_ms]', subghz.read_raw is 'freq name [timeout_ms]'."""
+        window_arg = {"subghz.read": 1, "subghz.read_raw": 2}.get(cmd)
+        if window_arg is not None:
+            window_ms = 3000
+            if len(args) > window_arg:
+                try:
+                    window_ms = int(args[window_arg])
+                except (TypeError, ValueError):
+                    pass
+            return window_ms / 1000.0 + 2.0
+        return DEFAULT_TIMEOUT

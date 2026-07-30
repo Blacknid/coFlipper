@@ -2,7 +2,8 @@
 
 Used for developing and testing the agent without the physical device connected.
 Responds like the real firmware: only the commands the firmware implements succeed
-(ping, info, subghz.rssi, subghz.read, subghz.replay and the ir.* bruteforce commands),
+(ping, info, subghz.rssi, subghz.read, subghz.send, subghz.read_raw, subghz.send_raw and
+the ir.* bruteforce commands),
 commands marked as stubs answer ERR not_implemented, anything else gets ERR unknown_command.
 
 The Wi-Fi/BLE commands (categories 'wifi' and 'ble' in commands.json) are served here by
@@ -535,8 +536,12 @@ class MockCFPClient:
             return self._subghz_rssi(args)
         if cmd == "subghz.read":
             return self._subghz_read(args)
-        if cmd == "subghz.replay":
-            return self._subghz_replay(args)
+        if cmd == "subghz.send":
+            return self._subghz_send(args)
+        if cmd == "subghz.read_raw":
+            return self._subghz_read_raw(args)
+        if cmd == "subghz.send_raw":
+            return self._subghz_send_raw(args)
         # The Wi-Fi dev board is served by its own simulator. On real hardware these travel
         # on to the ESP32 over UART; here they are answered locally, with the same state a
         # real board would carry across commands.
@@ -606,16 +611,65 @@ class MockCFPClient:
         # RSSI, in the fixed order the client and the subagent agree on.
         return ["signal", protocol, key, str(bits), str(actual), str(rssi)]
 
-    def _subghz_replay(self, args):
-        """Retransmit a saved .sub file. Offensive: on real hardware this keys the radio.
+    def _subghz_send(self, args):
+        """Retransmit a signal from its decoded parameters. Offensive: on real hardware this
+        keys the radio.
 
-        args: the path to the .sub file. The simulator transmits nothing (there is no radio),
-        it only confirms which file it would have sent, echoing the path back so the agent can
-        show the user exactly what was replayed. The firmware would read the file's Frequency
-        and Key and re-emit it; here we only acknowledge, and the result is marked simulated
-        upstream, so it can never be mistaken for a real transmission.
+        args: frequency, protocol, bits, key - the same fields the desktop reads out of a saved
+        .sub and the firmware hands to the protocol encoder. The simulator transmits nothing
+        (there is no radio); it validates the frequency band the real device would enforce, then
+        acknowledges, echoing the protocol back so the agent can show what it would have sent.
+        The result is marked simulated upstream, so it can never be mistaken for a real
+        transmission.
+        """
+        if len(args) < 4:
+            raise CFPError("missing_code")
+        try:
+            frequency = int(args[0])
+        except ValueError:
+            raise CFPError("invalid_frequency")
+        if not any(lo <= frequency <= hi for lo, hi in SUBGHZ_BANDS):
+            raise CFPError("invalid_frequency")
+        protocol = str(args[1])
+        return ["transmitted", protocol, "authorized_use_only"]
+
+    def _subghz_read_raw(self, args):
+        """Record a raw waveform to a named .sub 'on the device'. Passive.
+
+        args: frequency, name, [timeout_ms]. The simulator captures nothing real; it validates
+        the band, then, if that band carries any fixture signal, reports a plausible sample
+        count under the requested name (as the firmware's 'captured <samples> <name>'), and
+        remembers the name so a later subghz.send_raw of it is recognised. A band with no
+        fixtures answers 'no_signal', the same as a quiet air on hardware.
+        """
+        if len(args) < 2:
+            raise CFPError("missing_name")
+        try:
+            frequency = int(args[0])
+        except ValueError:
+            raise CFPError("invalid_frequency")
+        if not any(lo <= frequency <= hi for lo, hi in SUBGHZ_BANDS):
+            raise CFPError("invalid_frequency")
+        name = "".join(c for c in str(args[1]) if c.isalnum() or c in "_-")
+        if not name:
+            raise CFPError("missing_name")
+
+        band = next((b for b in SUBGHZ_BANDS if b[0] <= frequency <= b[1]), None)
+        if band is None or not _SUBGHZ_SIGNALS.get(band):
+            return ["no_signal"]
+        # A plausible, reproducible sample count derived from the frequency - real captures run
+        # to a few thousand edges.
+        samples = 1500 + (frequency // 100_000) % 1500
+        return ["captured", str(samples), name]
+
+    def _subghz_send_raw(self, args):
+        """Replay a raw capture by name. Offensive: on real hardware this keys the radio.
+
+        args: name. The simulator transmits nothing; it recognises a name it 'captured' earlier
+        (or any name, since on hardware the file is what matters and the desktop resolved it) and
+        acknowledges. Marked simulated upstream, so it can never be mistaken for a real send.
         """
         if not args:
-            raise CFPError("missing_file")
-        path = str(args[0])
-        return ["replayed", path, "authorized_use_only"]
+            raise CFPError("missing_name")
+        name = str(args[0])
+        return ["transmitted", name, "authorized_use_only"]

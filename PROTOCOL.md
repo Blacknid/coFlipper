@@ -36,8 +36,12 @@ Any other line received on the port (the CLI banner, the `>: ` prompt, log outpu
 | Command       | Arguments                    | Description                                              |
 |---------------|------------------------------|----------------------------------------------------------|
 | ping          | —                            | Checks whether the CFP server responds                   |
-| info          | —                            | The device name/model                                    |
+| info          | —                            | The device name/model, plus `heap=<bytes>` and `maxblock=<bytes>` (free heap and largest free block) |
 | subghz.rssi   | frequency                    | Signal level (dBm) measured on the given frequency       |
+| subghz.read   | frequency [timeout_ms]       | Decodes one received signal: `signal <protocol> <key> <bits> <freq> <rssi>`, or `no_signal` |
+| subghz.send   | frequency protocol bits key  | Re-encodes and transmits a decoded signal (offensive)    |
+| subghz.read_raw  | frequency name [timeout_ms] | Records the raw RF timings to `/ext/subghz/<name>.sub` on the device: `captured <samples> <name>`, or `no_signal`. No protocol decode - works for any signal |
+| subghz.send_raw  | name                      | Replays a raw capture recorded by subghz.read_raw, by its `<name>` (offensive) |
 | ir.queue      | protocol address command     | Adds one IR code to the pending list                     |
 | ir.bruteforce | [label]                      | Starts transmitting the queued codes                     |
 | ir.status     | —                            | Run state, codes sent, codes queued                      |
@@ -101,8 +105,10 @@ The distinction between `stopped` and `idle` is the whole result of the operatio
 | no_target_selected | An attack was requested before a target was chosen with `wifi.select_ap`/`wifi.select_station` |
 | invalid_channel    | A Wi-Fi channel outside the 1–14 range was requested                |
 | invalid_selection  | A target selector referenced an index that is not in the captured list |
-| missing_code       | ir.queue did not receive all three of protocol, address, command   |
-| unknown_protocol   | The IR protocol name is not one the firmware knows                 |
+| missing_code       | ir.queue did not receive all three of protocol/address/command, or subghz.send is missing one of frequency/protocol/bits/key |
+| unknown_protocol   | The protocol name is not one the firmware knows (IR bruteforce, or subghz.send) |
+| bad_code           | subghz.send's protocol/bits/key were rejected by that protocol's encoder |
+| out_of_memory      | subghz.read/subghz.send could not fit the decoder/encoder stack in the free heap while the app was resident, and refused rather than abort |
 | busy               | A bruteforce is already in progress                                |
 | queue_full         | The IR queue is full (32 codes)                                    |
 | empty_queue        | ir.bruteforce was called with no codes queued                      |

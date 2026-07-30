@@ -140,7 +140,11 @@ How you work:
    frequency is plainly dead (well below about -90 dBm), say so and stop - there is nothing
    to harvest.
 2. Call subghz.read on the frequency, in a loop, until the window is used up or reads stop
-   returning new signals. Each read decodes at most one signal.
+   returning new signals. Each read decodes at most one signal. Pass a generous timeout_ms
+   (a few seconds, e.g. 4000-8000) so ONE read covers a stretch of the window: each read sets
+   up and tears down the radio decoder, which on the device leaks a little memory per cycle,
+   so a handful of long reads is far kinder than dozens of short ones. Never hammer the
+   frequency with rapid one-shot reads.
    - A result beginning 'signal' carries: protocol, key, bit-length, the frequency actually
      synthesised, and RSSI, in that order.
    - A result of 'no_signal' means that read timed out with nothing decoded. A couple of
@@ -181,13 +185,18 @@ The main agent gives you a frequency (in Hz) and a window (in seconds). How you 
 1. Optionally take one subghz.rssi reading to note the resting background level, so the
    arriving signal can be told apart from it. This is not required - do not spend more than
    one reading on it.
-2. Call subghz.read on the frequency, in a loop. Each read waits a short moment for a decode.
-   - The instant a read returns a result beginning 'signal' - carrying protocol, key,
-     bit-length, the frequency actually synthesised and RSSI - you STOP. Do not read again:
-     the thing you were waiting for has arrived, and continuing only burns budget.
-   - A result of 'no_signal' means that read window passed with nothing on the air. That is
-     the EXPECTED case while you wait, not a reason to stop: keep reading until either a
-     signal arrives or your round budget is spent.
+2. Do ONE subghz.read on the frequency, passing the whole window as timeout_ms (seconds x
+   1000, capped by the firmware at 30000). A single read blocks on the radio for the whole
+   window and returns the moment a signal decodes - so ONE long read is how you wait, not a
+   loop of short reads. Looping short reads is wrong here: each read sets up and tears down
+   the radio decoder afresh, which is wasteful and, on the device, leaks a little memory
+   every cycle - so a tight loop is exactly what runs the Flipper out of memory. Prefer the
+   single long read.
+   - A result beginning 'signal' - carrying protocol, key, bit-length, the frequency actually
+     synthesised and RSSI - means the thing you were waiting for arrived. STOP and report it.
+   - A result of 'no_signal' means the whole window passed with nothing on the air. Only if
+     the main agent gave you a window longer than one read can cover (over 30 s) do you read
+     again for the remainder; otherwise one no_signal is your answer.
 3. When a signal arrives, report it: the protocol, key, bit-length and RSSI exactly as the
    read returned them, plus a plain-English guess at what the device plausibly is (a doorbell,
    a car fob, a relay, a sensor), stated as a guess. Say clearly that the signal WAS heard.
@@ -197,8 +206,8 @@ The main agent gives you a frequency (in Hz) and a window (in seconds). How you 
    too short, or the wrong frequency.
 
 Read every field from a real tool result - never invent a protocol, key or RSSI. Every read
-is a command on a physical radio and costs part of your budget, so keep reading while the
-window lasts, and stop the instant a signal lands.""",
+is a command on a physical radio: prefer one long read that spans the window over many short
+ones, and stop the instant a signal lands.""",
 )
 
 ANALYST = Spec(

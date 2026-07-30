@@ -5,7 +5,9 @@ App(
     entry_point="cfp_app_main",
     sources=["cfp_app.c"],
     # infrared: the IR bruteforce transmits through infrared_send / InfraredMessage.
-    fap_libs=["infrared"],
+    # subghz: subghz.read decodes received signals through the SubGhz receiver/environment
+    #   protocol stack, and subghz.send re-encodes and transmits a decoded signal.
+    fap_libs=["infrared", "subghz"],
     stack_size=2 * 1024,
     fap_category="Tools",
     fap_version="0.1",

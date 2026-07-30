@@ -50,8 +50,8 @@ def main():
     checks.check(f"it has subghz_read: {meta['tools']}", "subghz_read" in meta["tools"])
     checks.check("it was granted the save/list skills",
                  "save_subghz" in meta["tools"] and "list_subghz" in meta["tools"])
-    checks.check("it has NO replay tool - it is passive, it cannot transmit",
-                 "subghz_replay" not in meta["tools"])
+    checks.check("it has NO transmit tool - it is passive, it cannot transmit",
+                 "subghz_send" not in meta["tools"] and "subghz_replay" not in meta["tools"])
 
     checks.section("3. the listener harvests, deduplicates and saves each distinct signal")
     # A fresh client so the read cursor starts at the top of the band again.
