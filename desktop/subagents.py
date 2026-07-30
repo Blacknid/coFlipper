@@ -37,6 +37,7 @@ from agent import (
     INCLUDE_THOUGHTS,
     MODEL,
     SIMULATED_NOTICE,
+    WEB_SEARCH,
     answer_text,
     send_with_retry,
     thought_texts,
@@ -93,6 +94,11 @@ class Spec:
     max_rounds: int = 4
     # Whether the session log is appended to its task.
     needs_log: bool = False
+    # Whether this subagent is given native web search, on top of its device tools, so it can
+    # look a finding up online. Off for the radio subagents, which report only what the device
+    # measured; on for nfc_identify, whose whole job is to corroborate a tag against the world.
+    # Still gated by the global WEB_SEARCH switch: off there, no subagent gets it.
+    web_search: bool = False
 
 
 SCANNER = Spec(
@@ -256,6 +262,48 @@ its index, channel and encryption; if it does not appear, say so rather than gue
 with the few access points or stations that best match what the main agent asked for.""",
 )
 
+NFC_IDENTIFY = Spec(
+    key="nfc_identify",
+    name="nfc_identify",
+    role="reads an NFC tag, identifies its chip, guesses what it is used for, and looks it up online",
+    tools=("nfc.read", "nfc.watch"),
+    web_search=True,
+    max_rounds=6,
+    instruction="""Your speciality is identifying an NFC tag a user has presented to the
+Flipper: naming the chip, deducing what the tag is most plausibly used for, and corroborating
+that against the web.
+
+You have a PASSIVE read tool (nfc.read) and web search. You have NO nfc.emulate and no other
+transmit tool of any kind, on purpose: you can read a tag but never impersonate or write one,
+and you must not claim to. Emulating the card is the main agent's decision, taken with the
+user, after your report.
+
+How you work:
+1. Read the tag with nfc.read. The result is self-describing key=value tokens: type (the chip
+   the reader detected), uid, atqa, sak, protocol (ISO14443-3A, ISO14443-4 or ISO15693) and
+   bytes (storage). If the read returns no card, say so and stop rather than inventing one.
+2. State the chip type from the read. Then DEDUCE the likely real-world use and say what in the
+   read points to it - for example: a Mifare Classic 1K or Ultralight often serves as an
+   access/hotel key, a transit ticket or an event wristband; an NTAG21x (ISO14443-3A, a few
+   hundred bytes) is the common sticker/amiibo/smart-poster tag; a Mifare DESFire or an
+   ISO14443-4 card with SAK 20 is a secured credential - transit, payment or corporate access;
+   an EMV card is a contactless bank card. Say plainly it is an informed guess, not a
+   certainty: the chip narrows the use but rarely pins the exact system, and the UID alone
+   never identifies a person.
+3. SEARCH THE WEB for the tag type to corroborate and add detail: what the chip actually is,
+   its memory size and layout, its typical uses, and any well-known security notes. Ground your
+   guess in what you find and CITE the sources - name where each online detail came from, so the
+   main agent can show the user the tag was looked up, not merely assumed.
+4. Do not read secrets off the card or attempt to defeat its protection: many cards (bank
+   cards, DESFire) expose only public identifiers, and that boundary is the honest one to
+   report. If a hint from the user names the context ('my office badge'), weigh it, but say if
+   the read is consistent with it rather than just echoing it.
+
+Read every field from the tool result - never invent a UID, ATQA or type. End with: the chip
+type, your one-line reasoned guess at what the tag is for, and the corroborating online detail
+with its sources.""",
+)
+
 AUDIT = Spec(
     key="audit",
     name="audit",
@@ -290,7 +338,10 @@ again. End with a short, factual answer to the question, citing the app ids and 
 finding rests on.""",
 )
 
-SPECS = {spec.key: spec for spec in (SCANNER, LISTENER, WATCHER, ANALYST, WIFI_RECON, AUDIT)}
+SPECS = {
+    spec.key: spec
+    for spec in (SCANNER, LISTENER, WATCHER, ANALYST, WIFI_RECON, NFC_IDENTIFY, AUDIT)
+}
 
 
 class SubagentRunner:
@@ -330,16 +381,25 @@ class SubagentRunner:
         """
         return [name for name in spec.skills if name in SKILLS]
 
+    def _has_web_search(self, spec):
+        """Whether this subagent actually gets web search: it must ask for it AND the global
+        switch must be on, the same two-key rule the main agent's search obeys."""
+        return spec.web_search and WEB_SEARCH
+
     def describe(self, key):
         """What the interface announces when this subagent is summoned."""
         spec = SPECS[key]
         device_tools = [tool_name(command["name"]) for command in self._allowed(spec)]
+        # Web search is announced alongside the device tools and skills: to the user it is one
+        # more capability this subagent was given, and one worth showing, since it reaches the
+        # world rather than the device.
+        web = ["web_search"] if self._has_web_search(spec) else []
         return {
             "role": spec.role,
             "model": self.model,
             # Device tools and skills are announced together: to the user they are both
             # 'the tools this subagent was given', regardless of which layer serves them.
-            "tools": device_tools + self._allowed_skills(spec),
+            "tools": device_tools + self._allowed_skills(spec) + web,
             "max_rounds": spec.max_rounds,
         }
 
@@ -355,6 +415,9 @@ class SubagentRunner:
             tools.append(build_tool(allowed))
         if skills:
             tools.append(build_skill_tool({name: SKILLS[name] for name in skills}))
+        web = self._has_web_search(spec)
+        if web:
+            tools.append(types.Tool(google_search=types.GoogleSearch()))
         return self._genai.chats.create(
             model=self.model,
             config=types.GenerateContentConfig(
@@ -362,6 +425,12 @@ class SubagentRunner:
                 tools=tools or None,
                 thinking_config=(
                     types.ThinkingConfig(include_thoughts=True) if INCLUDE_THOUGHTS else None
+                ),
+                # Combining native web search with our function tools requires server-side tool
+                # invocations, exactly as the main chat's config does; only needed when the
+                # subagent actually has web search.
+                tool_config=(
+                    types.ToolConfig(include_server_side_tool_invocations=True) if web else None
                 ),
             ),
         )

@@ -20,6 +20,16 @@ The choice is **remembered across restarts**: the picked model is written to `se
 
 When one model is momentarily overloaded (a `503`), coFlipper does not fail on the first try: it rides the spike out with several retries and a growing wait (`COFLIPPER_SERVER_RETRIES`, six by default). Only if the overload outlasts them does it surface — as a plain message saying it is a passing Google-side spike and suggesting the picker or another model, not a stack trace — and the conversation stays alive.
 
+### Response speed
+
+Left to itself, a recent model plans at a high thinking effort and can spend several seconds before it emits even the first word of reasoning — the long pause before anything appears on screen. coFlipper sets the thinking level to `LOW` by default (`COFLIPPER_THINKING_LEVEL`, one of `MINIMAL`, `LOW`, `MEDIUM`, `HIGH`), so the reasoning starts and finishes far sooner; raise it for a harder job that needs deeper planning. In a live measurement, a search-backed answer began streaming in under three seconds. The setting applies to models that support `thinking_level` (the Gemini 3 family) and falls back to the model's own default elsewhere.
+
+### Web search
+
+The model can search the web, through Gemini's native Google Search grounding — it runs a search on its own, within the same turn, when it needs current or general knowledge (a product's specs, a brand's remote, a recent event). This is offered alongside the function tools; combining a built-in tool with function calling requires `tool_config.include_server_side_tool_invocations`, which the config sets. Turn it off with `COFLIPPER_WEB_SEARCH=0`. The honesty rule extends to it: web results are knowledge about the world, never a substitute for a device measurement, and the model must not present something found online as if the Flipper measured it. Verified live: asked who won the 2024 Nobel Peace Prize, it searched and answered correctly (Nihon Hidankyo), and a device measurement in the same configuration still called `subghz_rssi` as before.
+
+A search is not invisible: like an online IR lookup, it appears in the reasoning chain as its own step (`SEARCH`), showing the queries the model issued and the sources it read — so an answer that leans on the web shows exactly what it read, the same transparency the rest of the chain gives. The grounding metadata (queries and sources) is harvested from the streamed response in `_consume_stream` and recorded by `run_turn`; verified live, the step captured the real query and its sources (Wikipedia and others).
+
 Practical findings from during development, on the free plan:
 
 - the limit is approximately **20 requests per day for each model** among the recent generations (verified on `gemini-3.6-flash` and `gemini-3.5-flash`). A single exchange of messages can consume two or three requests, since every round of tool calls needs an additional request, so the limit is reached quickly;
@@ -118,6 +128,8 @@ So the agent can delegate. A subagent is a separate conversation with the model:
 | scanner | measures the radio spectrum over several successive readings | `ping`, `info`, `subghz.rssi` |
 | listener | harvests every distinct Sub-GHz signal on a frequency across a window | `ping`, `info`, `subghz.rssi`, `subghz.read` + save/list skills |
 | watcher | waits on a frequency for a bounded window and reports the first signal that arrives | `ping`, `info`, `subghz.rssi`, `subghz.read` |
+| wifi_recon | surveys the Wi-Fi/BLE environment on the Marauder board and reports an interpreted picture | `wifi.board_info`, `wifi.set_channel`, `wifi.scan_ap`, `wifi.scan_station`, `wifi.list_ap`, `wifi.list_station`, `ble.scan`, `ble.list` |
+| nfc_identify | reads an NFC tag, names the chip, guesses what it is used for, and looks it up online | `nfc.read`, `nfc.watch` + web search |
 | analyst | researches the session log | none |
 
 The analyst having no tools at all is deliberate, not an omission. A subagent that can only read cannot disturb the radio, and it cannot be the source of a fabricated measurement either: everything it says has to be traceable to a line of the log it was given.
@@ -190,6 +202,8 @@ The reply is streamed, not shown whole at the end: the answer types itself out a
 
 The composer has a single, text-free button, like Claude's: an up-arrow to send, which turns into a stop square the moment a turn starts. Pressing stop cancels the work in progress — the turn checks a flag at its natural boundaries (between rounds, between streamed chunks, before each tool call) and aborts with `TurnCancelled`, so a stop takes effect within a moment rather than the instant it is pressed (a thread cannot be killed safely mid-request). What was already shown stays on screen, marked `· oprit ·`, and the composer returns to the send arrow. Because the check is cooperative, it never leaves the device mid-command: it stops before the next one, not in the middle of one.
 
+The look takes after qFlipper, and it is meant to feel alive rather than static. The device card is drawn on a canvas with qFlipper's faint grid behind it; the connection dot *breathes* — a slow pulse between a dim and a full version of its colour — while connected or simulated, and steadies into a fixed alarm on an error. The "working" indicator animates a moving ellipsis while a chat runs, the composer glows orange while it has focus, and the toolbar buttons and tabs lift under the pointer. All of this runs off one slow timer (`_anim_tick`) on the main thread, alongside the typewriter — no threads, no busy-waiting.
+
 ## Parallel chats and merge
 
 A chat is not the whole window; it is one tab. The `+ chat nou` button opens another, and each tab is a fully independent conversation with the model: its own history, its own reasoning chain, its own Gemini chat session. They run at the same time, each on its own worker thread, so several lines of work advance in parallel while the user reads or types in any one of them. The top bar shows how many are working at once.
@@ -210,11 +224,15 @@ The long-term memory is `memory.py`: a small set of durable facts the agent chos
 
 Together with the stopping conditions already in place — a turn ends when the model asks for no further command, and every subagent runs under a hard round budget — these give the agentic loop its memory, its context management and its halting.
 
-## Voice input
+## Voice and file input (multimodal)
 
-A request need not be typed. The mic button (🎤) in each chat records a spoken message — push to talk, click again to stop — and sends it to the model as audio. There is no separate speech-to-text step: Gemini understands the audio directly, so it transcribes and acts on the request in the same turn, the same way it would a typed one. A spoken "turn off my Samsung television" reaches the model as sound, and comes out as an `agent_ir_control` call with the brand and function already worked out.
+A request need not be typed. Each chat has one text-free attach button (`＋`) next to the composer, in Claude's minimal style: it opens a small menu with two choices — a **spoken message** or a **file** — rather than a separate button for each. Both reach the model the same way, as an inline part on the turn's first message (`_first_message` in `agent.py`), so the model understands them directly, with no separate transcription or OCR step, and acts on them in the same turn as a typed request would.
 
-The audio rides only on the first round of the turn; the later rounds, which answer the model's tool calls, stay text, so the model never re-hears the same message. The recording is captured at 16 kHz mono — enough for speech, a fraction of the upload of CD-quality audio. Microphone capture is an optional dependency (`sounddevice`): if it or a microphone is missing, the button simply is not offered and everything else works unchanged.
+A **file** (image, PDF, audio, text…) is read from disk, its type guessed from the extension, and sent with whatever question is typed alongside it. A photographed appliance can therefore drive the IR feature — the model reads the image, recognises the brand, and calls `agent_ir_control` with it already filled in. Verified live: a solid-red PNG attached with "what colour is the image?" came back "the image is red", and an audio part (the voice path below) is the same mechanism.
+
+A **spoken message** is recorded push-to-talk (`＋` → voice, click again to stop) and sent as audio. There is no separate speech-to-text step: Gemini understands the audio directly, so it transcribes and acts on the request in the same turn. A spoken "turn off my Samsung television" reaches the model as sound, and comes out as an `agent_ir_control` call with the brand and function already worked out.
+
+The attachment rides only on the first round of the turn; the later rounds, which answer the model's tool calls, stay text, so the model never re-reads it. A recording is captured at 16 kHz mono — enough for speech, a fraction of the upload of CD-quality audio. Microphone capture is an optional dependency (`sounddevice`): if it or a microphone is missing, only the voice entry drops out of the menu — the attach button and file attachments still work, and everything else is unchanged.
 
 Two things keep the transcription honest. Left to guess, the model sometimes mis-detects the language of a short phrase — a Romanian "Cum te cheamă" heard as Italian, since the two sound alike — and then answers in the wrong language. So a spoken turn carries a short hint that **pins the language** (`COFLIPPER_VOICE_LANG`, Romanian by default) and tells the model not to drift to a similar-sounding one. The hint also asks the model to **begin its reply by restating what it heard** (`Am auzit: "…"`), so a mishearing shows on screen instead of passing silently — the user can see at a glance whether it understood them. The hint is added only for audio, never for a typed message.
 
@@ -274,6 +292,8 @@ It can also be used as a module, which is how `agent.py` obtains its client:
 | test_reasoning.py | checks the construction of the reasoning chain |
 | test_subagents.py | checks delegation, the session log and the round budget |
 | test_app_builder.py | checks the app-builder debate, the compile-error feedback loop, budgets, honesty and persistence |
+| test_wifi.py | checks the Wi-Fi feature: the passive recon subagent, the scan/list flow, and the targeted, gated deauth |
+| test_nfc.py | checks the NFC feature: the raw read, the passive identify subagent with web search, and the gated emulation |
 | test_gemini.py | a minimal check of the connection to the Gemini API |
 | list_models.py | lists the models available to the configured key |
 

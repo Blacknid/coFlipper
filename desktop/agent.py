@@ -20,7 +20,7 @@ from google import genai
 from google.genai import errors, types
 
 from commands import CommandDispatcher, build_tool, load_catalog, model_commands
-from reasoning import ANSWER, REPORT, SPAWN, THOUGHT, TOOL, Trace
+from reasoning import ANSWER, REPORT, SEARCH, SPAWN, THOUGHT, TOOL, Trace
 
 # A deliberately pinned model, not a "latest" alias: the alias always tracks the most
 # recent generation, and that generation comes with different usage limits.
@@ -90,6 +90,38 @@ class ModelOverloaded(Exception):
 # exactly those commands.
 # COFLIPPER_THOUGHTS=0 disables the request, for models that do not accept it.
 INCLUDE_THOUGHTS = os.environ.get("COFLIPPER_THOUGHTS", "1") != "0"
+
+# How hard the model thinks before it answers. Left unset, the recent models plan at a high
+# effort and can spend many seconds before emitting even the first word of reasoning - which
+# is the long pause the user feels before anything appears. LOW makes the reasoning start (and
+# finish) far sooner, at a small cost in depth; MINIMAL is faster still. Raise it to MEDIUM or
+# HIGH for harder multi-step jobs. Applies to models that support thinking_level (the Gemini 3
+# family); an unrecognised value falls back to the model's own default.
+THINKING_LEVEL = os.environ.get("COFLIPPER_THINKING_LEVEL", "LOW").upper()
+
+# Native web search (Google Search grounding). Lets the model look things up online when it
+# needs current or general knowledge - a brand's remote, a protocol, a recent fact. Device and
+# signal data still come only from the device tools; the search is for the world, not the
+# hardware. Disable with COFLIPPER_WEB_SEARCH=0.
+WEB_SEARCH = os.environ.get("COFLIPPER_WEB_SEARCH", "1") != "0"
+
+
+def _thinking_config():
+    """The reasoning config: whether to stream thought summaries, and how hard to think. A None
+    thinking_level (unset or unrecognised) leaves the model on its own default effort."""
+    if not INCLUDE_THOUGHTS and not THINKING_LEVEL:
+        return None
+    level = getattr(types.ThinkingLevel, THINKING_LEVEL, None)
+    return types.ThinkingConfig(include_thoughts=INCLUDE_THOUGHTS, thinking_level=level)
+
+
+def _config_tools(commands):
+    """The tools offered to the model: the device/agent functions, plus native web search when
+    enabled so the model can look things up online when it decides it needs to."""
+    tools = [build_tool(commands)]
+    if WEB_SEARCH:
+        tools.append(types.Tool(google_search=types.GoogleSearch()))
+    return tools
 
 SYSTEM_INSTRUCTION = """You are the assistant of the coFlipper project. You control a
 Flipper Zero device connected over USB, using the tools placed at your disposal.
@@ -250,6 +282,28 @@ Rules you follow strictly:
     A script that sends a TRANSMITTING command (subghz.replay, ir.send, nfc.emulate, offensive
     Wi-Fi/BLE) is offensive just as a direct call would be: you run the authorization gate
     first and keep scripts passive unless the user has authorized the transmission.
+17. You can search the web. When the user asks about something you are unsure of or that may
+    have changed - a product and its specs, a brand's remote, a protocol detail, a recent
+    event, anything current - look it up online instead of guessing, and base your answer on
+    what you find. Keep the distinction you already keep for the device: web results are
+    general knowledge about the world, never a substitute for a measurement. You never present
+    something found online as if the Flipper measured it, and you never invent a device reading
+    from a web page. Search for the world; use the device tools for the hardware.
+18. For NFC tags and cards, when the user presents one and asks what it is ('what is this
+    card', 'read this tag and tell me what it is', 'identify this NFC'), you use the
+    agent_identify_nfc tool. It delegates to the nfc_identify subagent, which reads the tag
+    (nfc.read), names the chip type from the read, deduces what the tag is most plausibly USED
+    FOR - an access/hotel key, a transit pass, a contactless bank card, an amiibo or NFC
+    sticker, an event wristband - and searches the web for corroborating detail about that chip
+    (its memory, its common uses, security notes), citing the sources. Pass any hint the user
+    gave about the tag as the goal. You do not call nfc.read yourself and interpret it: the
+    subagent reads, guesses and looks it up as one job, and it is passive - it can never
+    emulate the card. Relay its identification as an informed guess, not a certainty: the chip
+    narrows the likely use but rarely pins the exact system, and a UID never identifies a
+    person. Emulating a saved card (nfc.emulate) is a separate, OFFENSIVE action - the Flipper
+    impersonates that card to a reader - so you treat it exactly like the offensive Wi-Fi tools
+    and a Sub-GHz replay: you FIRST ask the user to confirm in one sentence that they own the
+    card or are authorized to test it, and you send nfc.emulate only after they confirm.
 """
 
 # Appended to the system instruction when working without a physical device. Without it,
@@ -288,10 +342,18 @@ def _chat_config(commands, simulated=False, memory_prompt=""):
     conversation keeps exactly the same tools and instruction after it is compacted."""
     return types.GenerateContentConfig(
         system_instruction=_system_instruction(simulated, memory_prompt),
-        tools=[build_tool(commands)],
-        thinking_config=(
-            types.ThinkingConfig(include_thoughts=True) if INCLUDE_THOUGHTS else None
-        ),
+        tools=_config_tools(commands),
+        thinking_config=_thinking_config(),
+        # Built-in tools (web search) and our function tools may only be combined when server-
+        # side tool invocations are allowed, so the model can run a search on its own within a
+        # turn. Harmless when web search is off (there is then no built-in tool to invoke).
+        tool_config=types.ToolConfig(include_server_side_tool_invocations=True)
+        if WEB_SEARCH
+        else None,
+        # We run the tool loop ourselves (run_turn), so the SDK's automatic function calling is
+        # not used; disabling it explicitly also silences its "AFC disabled" warning, which it
+        # emits on every request once a built-in tool sits alongside our function declarations.
+        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
     )
 
 
@@ -506,18 +568,45 @@ def _open_stream_with_retry(chat, message):
             _retry_after_error(exc, attempt)
 
 
+def _collect_grounding(chunk, queries, sources, seen):
+    """Harvests any Google Search grounding from a streamed chunk into the running queries and
+    sources. The metadata (what the model searched, which pages it read) rides on the candidate,
+    usually in the final chunks; it accumulates here so the turn can show the search it ran."""
+    for candidate in getattr(chunk, "candidates", None) or []:
+        meta = getattr(candidate, "grounding_metadata", None)
+        if not meta:
+            continue
+        for query in getattr(meta, "web_search_queries", None) or []:
+            if query and query not in queries:
+                queries.append(query)
+        for gchunk in getattr(meta, "grounding_chunks", None) or []:
+            web = getattr(gchunk, "web", None)
+            uri = getattr(web, "uri", None) if web else None
+            if uri and uri not in seen:
+                seen.add(uri)
+                sources.append(
+                    {
+                        "uri": uri,
+                        "title": getattr(web, "title", "") or "",
+                        "domain": getattr(web, "domain", "") or "",
+                    }
+                )
+
+
 def _consume_stream(stream, first, on_thought_delta=None, on_answer_delta=None, should_stop=None):
     """Reads a streamed round, emitting text as it arrives, and returns what it amounts to.
 
-    Returns (thoughts, answer, calls): the reasoning summaries (each a full string), the
-    answer text, and the tool calls requested. The deltas are forwarded live through the two
-    callbacks, which is what gives the interface its typing feel; the return value is what the
-    turn loop acts on, exactly as if the response had arrived whole.
+    Returns (thoughts, answer, calls, grounding): the reasoning summaries (each a full string),
+    the answer text, the tool calls requested, and any web search the model ran on its own
+    ({queries, sources} or None). The deltas are forwarded live through the two callbacks, which
+    is what gives the interface its typing feel; the return value is what the turn loop acts on,
+    exactly as if the response had arrived whole.
 
     should_stop, when it returns True, aborts the stream between chunks with TurnCancelled - so
     a stop pressed while the model is still streaming its answer takes effect promptly.
     """
     thoughts, current, answer, calls = [], [], [], []
+    queries, sources, seen = [], [], set()
 
     def flush_thought():
         if current:
@@ -529,6 +618,7 @@ def _consume_stream(stream, first, on_thought_delta=None, on_answer_delta=None, 
         if should_stop and should_stop():
             stream.close()
             raise TurnCancelled()
+        _collect_grounding(chunk, queries, sources, seen)
         for part in _response_parts(chunk):
             if getattr(part, "thought", False) and getattr(part, "text", None):
                 current.append(part.text)
@@ -546,7 +636,8 @@ def _consume_stream(stream, first, on_thought_delta=None, on_answer_delta=None, 
             flush_thought()
             calls.append(call)
     flush_thought()
-    return thoughts, "".join(answer), calls
+    grounding = {"queries": queries, "sources": sources} if (queries or sources) else None
+    return thoughts, "".join(answer), calls, grounding
 
 
 # The language a voice message is assumed to be in. Left to guess, the model sometimes mis-
@@ -563,6 +654,16 @@ VOICE_HINT = (
     "with one short line, in that language, restating what you understood - e.g. 'Am auzit: "
     "\"...\"' - so a mishearing is visible, then answer normally."
 )
+
+
+def _attachment_label(attachment):
+    """A short stand-in shown in the reasoning chain when a request has no text of its own -
+    a spoken message or an attached file - so the chain does not open on a blank request line."""
+    if not attachment:
+        return ""
+    if attachment.get("mime_type", "").startswith("audio/"):
+        return "🎤 mesaj vocal"
+    return "📎 fișier atașat"
 
 
 def _first_message(message, attachment):
@@ -613,7 +714,7 @@ def run_turn(chat, dispatcher, message, on_step=None, on_delta=None, attachment=
 
     Returns (answer, chain).
     """
-    trace = Trace(message or "🎤 mesaj vocal")
+    trace = Trace(message or _attachment_label(attachment) or "cerere")
 
     def record(step):
         if on_step:
@@ -663,12 +764,17 @@ def run_turn(chat, dispatcher, message, on_step=None, on_delta=None, attachment=
         check_stop()
         trace.next_round()
         stream, first = _open_stream_with_retry(chat, pending)
-        thoughts, answer, calls = _consume_stream(
+        thoughts, answer, calls, grounding = _consume_stream(
             stream, first, thought_delta, answer_delta, should_stop
         )
 
         for thought in thoughts:
             record(trace.add_thought(thought))
+
+        # A web search the model ran itself this round: show the queries and the sources it
+        # read, the same way an online IR search shows the files it consulted.
+        if grounding:
+            record(trace.add_search(grounding["queries"], grounding["sources"]))
 
         if not calls:
             reply = answer.strip()
@@ -757,6 +863,10 @@ def main():
         elif step.kind == REPORT:
             print(f"  {indent}[subagent] {step.name} reports to the agent "
                   f"({step.meta.get('commands', 0)} commands): {step.text}")
+        elif step.kind == SEARCH:
+            print(f"  {indent}[web] searched: {', '.join(step.queries) or '(web search)'}")
+            for src in step.sources:
+                print(f"  {indent}[web] -> {src.get('domain') or src.get('title') or src.get('uri')}")
         elif step.kind == ANSWER:
             print(f"  [agent] answer phrased after {step.at_s:.1f} s")
 
