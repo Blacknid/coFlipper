@@ -1,32 +1,22 @@
 """A simulated Flipper, with the same interface as CFPClient.
 
-<<<<<<< HEAD
 Used for developing and testing the agent without the physical device connected.
-Responds like the real firmware: only the commands the firmware implements succeed
-(ping, info, subghz.rssi), and anything else gets ERR unknown_command.
+Responds like the real firmware: the commands it implements succeed (ping, info,
+subghz.rssi and the ir.* commands), the commands marked as stubs answer ERR
+not_implemented, and anything else gets ERR unknown_command.
 
 The Wi-Fi/BLE commands (categories 'wifi' and 'ble' in commands.json) are served here by
 a small Marauder simulator, so the whole Wi-Fi feature - scanning, listing, selecting a
 target, attacking, sniffing, BLE - can be exercised end to end without the ESP32 board.
 Its data is just as fictitious as subghz.rssi's, and carries the same 'simulated' marking.
 
+The IR bruteforce commands are simulated with real state (a queue, a counter), because
+the desktop side polls them in a loop: a stub that always answered the same would let
+that loop spin until it timed out.
+
 The values returned by subghz.rssi are fictitious. They cannot be mistaken for real
 measurements: the client is marked 'simulated', and that marking accompanies every
 result sent to the model (see CommandDispatcher._result).
-=======
-Serveste la dezvoltarea si testarea agentului fara dispozitivul fizic conectat.
-Raspunde ca firmware-ul real: reusesc doar comenzile pe care acesta le implementeaza
-(ping, info, subghz.rssi si comenzile ir.*), comenzile marcate ca stub raspund ERR
-not_implemented, iar orice altceva primeste ERR unknown_command.
-
-Valorile intoarse de subghz.rssi sunt fictive. Ele nu pot fi confundate cu masuratori
-reale: clientul e marcat 'simulated', iar marcajul insoteste fiecare rezultat trimis
-modelului (vezi CommandDispatcher._result).
-
-Comenzile de bruteforce IR sunt simulate cu stare reala (o coada, un contor), fiindca
-partea de desktop le interogheaza in bucla: un stub care ar raspunde mereu la fel ar
-lasa acea bucla sa se roteasca pana la expirarea timpului.
->>>>>>> 655a80a85f43f7e3f520c36f472286eba905fc2d
 """
 
 import random
@@ -38,23 +28,17 @@ IMPLEMENTED = {
     "info": ["Flipper", "Zero", "(simulated)"],
 }
 
-<<<<<<< HEAD
+# Commands the firmware recognises but has not implemented yet: they answer
+# not_implemented, not unknown_command, so the agent sees the same distinction as on the
+# real device.
+STUBS = ("subghz.info", "ir.info", "nfc.info")
+
+# The IR bruteforce commands served with simulated state by _ir_request.
+IR_COMMANDS = ("ir.reset", "ir.queue", "ir.bruteforce", "ir.status")
+
 # The bands the device's CC1101 transceiver is able to work in. The firmware rejects any
 # frequency outside them, so the simulator has to do the same: otherwise the agent would
 # be developed against a device more permissive than the real one.
-=======
-# Comenzi pe care firmware-ul le recunoaste, dar nu le-a implementat inca: raspund
-# not_implemented, nu unknown_command, ca agentul sa vada aceeasi diferenta ca pe
-# dispozitivul real.
-STUBS = ("subghz.info", "ir.info", "nfc.info")
-
-# Comenzile de bruteforce IR servite cu stare simulata de _ir_request.
-IR_COMMANDS = ("ir.reset", "ir.queue", "ir.bruteforce", "ir.status")
-
-# Benzile in care emitatorul-receptor CC1101 al dispozitivului poate lucra. Firmware-ul
-# respinge orice frecventa din afara lor, deci simulatorul trebuie sa faca la fel:
-# altfel agentul ar fi dezvoltat pe un dispozitiv mai permisiv decat cel real.
->>>>>>> 655a80a85f43f7e3f520c36f472286eba905fc2d
 SUBGHZ_BANDS = (
     (300_000_000, 348_000_000),
     (387_000_000, 464_000_000),
@@ -432,12 +416,10 @@ class MockCFPClient:
 
     def __init__(self, stop_after=None):
         self.calls = []
-<<<<<<< HEAD
         # How many readings have been taken per frequency, which selects the jitter.
         self._readings = {}
         # Serves every wifi.*/ble.* command, holding the same state the real board would.
         self._marauder = MarauderSim()
-=======
         # IR bruteforce state, mirroring CfpIrState in the firmware.
         self._ir_queue = []
         self._ir_sent = 0
@@ -446,7 +428,6 @@ class MockCFPClient:
         # Which code the simulated user "reacts" to by pressing OK. None means no code
         # works and the run goes to exhaustion.
         self._stop_after = stop_after
->>>>>>> 655a80a85f43f7e3f520c36f472286eba905fc2d
 
     def close(self):
         pass
@@ -509,16 +490,13 @@ class MockCFPClient:
             return self._ir_request(cmd, args)
         if cmd == "subghz.rssi":
             return self._subghz_rssi(args)
-<<<<<<< HEAD
         # The Wi-Fi dev board is served by its own simulator. On real hardware these travel
         # on to the ESP32 over UART; here they are answered locally, with the same state a
         # real board would carry across commands.
         if cmd.startswith(("wifi.", "ble.")) or cmd == "marauder.reboot":
             return self._marauder.handle(cmd, args)
-=======
         if cmd in STUBS:
             raise CFPError("not_implemented")
->>>>>>> 655a80a85f43f7e3f520c36f472286eba905fc2d
         raise CFPError("unknown_command")
 
     def _subghz_rssi(self, args):

@@ -57,11 +57,7 @@ The solution has three components that complement one another:
 
 Without the first measure, the restriction in the instruction would have remained a mere recommendation, one the model had no way to apply: nothing in the data it received indicated that it was inside a simulation.
 
-<<<<<<< HEAD
 ## The reasoning chain
-=======
-## Lanțul de raționament
->>>>>>> 655a80a85f43f7e3f520c36f472286eba905fc2d
 
 Between the user's request and the final answer lies a succession of decisions: which tool is worth calling, what the device responded, what conclusion can be drawn from that response, whether another measurement is needed. The application keeps this succession and displays it step by step, in the order in which it happened. A turn may contain several rounds of dialogue with the model, and every round contributes steps to the chain.
 
@@ -162,15 +158,11 @@ The second is the choice of model. The free-tier quota is counted separately per
 
 Subagents run one at a time, deliberately. Running them in parallel would buy little here — there is a single radio in the device, so measurements have to be serialised anyway — while multiplying the risk of hitting the per-minute rate limit. The device access they do share is guarded by a lock, since a single serial port serves the Flipper and two overlapping requests would desynchronise the protocol, matching responses to the wrong command.
 
-<<<<<<< HEAD
 ## The graphical interface
 
 The window is split into two panels: on the left the conversation proper, on the right the reasoning chain described above. The top bar carries the project name and the active language model; the connection status (green for connected, red for error, yellow for simulated mode), the serial port in use and the available tools live in the device card below it.
 
 While the agent is working, the status bar follows the chain: it shows whether the model is reasoning at that moment or executing a particular command on the device, not merely the fact that it is busy.
-=======
-Cât timp agentul lucrează, bara de stare urmărește lanțul: arată dacă modelul raționează în acel moment sau execută o anumită comandă pe dispozitiv, nu doar faptul că este ocupat.
->>>>>>> 655a80a85f43f7e3f520c36f472286eba905fc2d
 
 ## Bringing up the connection
 
@@ -204,12 +196,14 @@ It can also be used as a module, which is how `agent.py` obtains its client:
 
 | File | Role |
 |---|---|
-<<<<<<< HEAD
 | gui.py | the graphical application (Tkinter) |
 | agent.py | the agent proper: the conversation loop and orchestration of tool calls |
 | reasoning.py | the reasoning chain: the steps of a turn, in the order they happened |
 | subagents.py | the subagents: specialised assistants the main agent delegates to |
 | commands.py | conversion of the commands.json catalog into Gemini tools, and dispatching of calls |
+| ir_bruteforce.py | the IR control/bruteforce orchestration behind the agent.ir_control tool |
+| ir_codes.py | the built-in table of infrared codes, by appliance type and brand |
+| irdb.py | lookup in the online IRDB database of real remotes, used as a fallback |
 | device.py | the device connection used by the interface, on a background thread |
 | protocol.py | implementation of the CFP client over the serial port |
 | cfp_client.py | connection setup (port detection + launching the application) and a console for sending CFP commands manually, without a language model |
@@ -219,18 +213,6 @@ It can also be used as a module, which is how `agent.py` obtains its client:
 | test_subagents.py | checks delegation, the session log and the round budget |
 | test_gemini.py | a minimal check of the connection to the Gemini API |
 | list_models.py | lists the models available to the configured key |
-=======
-| gui.py | aplicația cu interfață grafică (Tkinter) |
-| agent.py | nucleul agentului: bucla de conversație și orchestrarea apelurilor de unelte |
-| reasoning.py | lanțul de raționament: pașii unui tur, în ordinea în care s-au produs |
-| commands.py | conversia catalogului commands.json în unelte Gemini și dispecerizarea apelurilor |
-| device.py | conexiunea cu dispozitivul folosită de interfață, pe un fir de execuție separat |
-| protocol.py | implementarea clientului CFP peste portul serial |
-| cfp_client.py | stabilirea conexiunii (detecția portului + lansarea aplicației) și consolă pentru trimiterea manuală de comenzi CFP, fără model de limbaj |
-| mock_flipper.py | Flipper simulat, cu aceeași interfață ca clientul real |
-| test_gemini.py | verificare minimală a conexiunii la API-ul Gemini |
-| list_models.py | listează modelele disponibile pentru cheia configurată |
->>>>>>> 655a80a85f43f7e3f520c36f472286eba905fc2d
 
 ## Verification status
 
@@ -243,7 +225,6 @@ Scenarios verified on the physical device:
 - comparing two frequencies, with the agent deciding on its own to perform two successive measurements and formulate a conclusion;
 - requesting a physically impossible frequency (2.4 GHz), in which case the agent reported the error returned by the device and correctly explained the hardware limitation, without inventing a measurement.
 
-<<<<<<< HEAD
 The graphical interface was verified separately, with the simulated device: connecting, correct enabling of the controls, sending a request, displaying the executed commands and the final response, as well as handling errors without freezing the window.
 
 Two test suites cover the parts that can be checked without hardware and without the API. Both run in under a second and can be repeated freely, since the model is replaced by a scripted set of responses:
@@ -262,12 +243,3 @@ That the real model does return reasoning summaries while also using tools was c
 Delegation was confirmed the same way, and for the same reason: a scripted model cannot show whether a real one *chooses* to delegate. Asked whether there was real activity on 433.92 MHz — with the request stating explicitly that a single instantaneous reading was not what was wanted — the main agent summoned the scanner of its own accord rather than calling `subghz.rssi` itself. The scanner checked the device with `info`, took five readings, reported back that all five sat at -93.9 dBm with no variation, and the main agent phrased the conclusion from that report while stating that the data came from a simulator. The whole turn took 22 seconds, which is itself the argument for delegating work of this kind rather than running it inside the conversation.
 
 The simulator reproduces `subghz.rssi` as well, with the same frequency bands the device's CC1101 transceiver accepts. Without that restriction, the agent would have been developed against a device more permissive than the real one, and a frequency rejected by the hardware would have gone unnoticed during development.
-=======
-Interfața grafică a fost verificată separat, cu dispozitivul simulat: conectare, activarea corectă a controalelor, trimiterea unei cereri, afișarea comenzilor executate și a răspunsului final, precum și tratarea erorilor fără blocarea ferestrei.
-
-Construirea lanțului de raționament a fost verificată cu modelul înlocuit printr-un set fix de răspunsuri, ceea ce permite verificarea repetată fără a consuma cota zilnică de cereri: ordinea pașilor pe mai multe runde, faptul că fiecare pas ajunge imediat la afișaj, separarea rezumatelor de raționament de textul răspunsului, marcarea rezultatelor simulate, un tur în care comanda eșuează și cazul unui model care nu produce rezumate de raționament.
-
-Faptul că modelul real întoarce efectiv rezumate de raționament atunci când folosește și unelte a fost confirmat separat, cu API-ul Gemini: la cererea de a compara nivelul de semnal de pe două frecvențe, agentul a raționat, a efectuat cele două măsurători și a formulat concluzia, iar lanțul a cuprins toți pașii în ordine. Această verificare nu poate fi înlocuită de cea cu răspunsuri fixe, fiindcă exact aici se afla incertitudinea: dacă modelul acceptă cererea de rezumate simultan cu apelarea uneltelor.
-
-Simulatorul reproduce și `subghz.rssi`, cu aceleași benzi de frecvență pe care le acceptă emițătorul-receptor CC1101 al dispozitivului. Fără această restricție, agentul ar fi fost dezvoltat împotriva unui dispozitiv mai permisiv decât cel real, iar o frecvență respinsă de hardware ar fi trecut neobservată în timpul dezvoltării.
->>>>>>> 655a80a85f43f7e3f520c36f472286eba905fc2d
