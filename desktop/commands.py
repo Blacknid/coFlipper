@@ -38,9 +38,10 @@ def device_commands(catalog, statuses=AVAILABLE_STATUSES):
     or the individual steps of an IR bruteforce, which the agent layer drives itself)
     and have no business being in its tool list.
 
-    Only the 'device' layer is returned here; the desktop-side agent commands come from
-    agent_commands(), and model_commands() joins the two. Folding both into one filter
-    would double-count the agent commands, since model_commands() adds them again.
+    Agent-layer commands are intentionally NOT included here - agent_commands() returns
+    those. Keeping the two disjoint is what stops an agent-layer tool from appearing twice
+    in model_commands(), once from each function; the model would otherwise receive the
+    same tool declared two times.
     """
     return [
         cmd
@@ -113,15 +114,37 @@ def build_tool(commands):
     return types.Tool(function_declarations=declarations)
 
 
+def build_skill_tool(skills):
+    """A Gemini tool from skill entries (name -> {description, args}).
+
+    Skills are desktop capabilities, not CFP commands, so their names are already bare
+    identifiers ('search_app_store'); no dot-to-underscore mapping is needed, and none is
+    applied, so the name the model calls is the name dispatch_skill looks up.
+    """
+    declarations = []
+    for name, skill in skills.items():
+        declarations.append(
+            types.FunctionDeclaration(
+                name=name,
+                description=skill["description"],
+                parameters=_parameters_schema(skill),
+            )
+        )
+    return types.Tool(function_declarations=declarations)
+
+
 class CommandDispatcher:
     """Routes a tool call received from the model to whoever carries it out.
 
-    Three destinations: device-layer commands become CFP requests to the Flipper;
-    agent-layer commands with a 'subagent' field summon that subagent; the remaining
-    agent-layer commands (currently the IR control/bruteforce) run as a Python
-    orchestration on the desktop. The dispatcher is also where the session log is kept,
-    since every device command passes through here anyway - and that log is the material
-    the analyst subagent researches.
+    Three destinations, all reached from dispatch():
+      - device-layer commands become CFP requests to the Flipper;
+      - agent-layer commands that name a subagent (the 'subagent' field) summon it;
+      - agent-layer commands without a subagent run desktop Python (the IR bruteforce,
+        and the Flipper app builder), orchestrated here rather than in a single CFP frame.
+
+    The dispatcher is also where the session log is kept, since every device command
+    passes through here anyway - and that log is the material the analyst subagent
+    researches.
     """
 
     def __init__(self, commands, client, subagents=None, on_progress=None, memory=None):
@@ -133,8 +156,8 @@ class CommandDispatcher:
         # The persistent memory the agent.remember tool writes to. None disables it: the
         # tool then reports that memory is unavailable instead of silently doing nothing.
         self.memory = memory
-        # Called as a long-running agent command advances (currently the IR bruteforce),
-        # so the interface can show progress instead of appearing frozen.
+        # Called as a long-running agent command advances (the IR bruteforce, the app
+        # build), so the interface can show progress instead of appearing frozen.
         self._on_progress = on_progress
         # A single serial port serves the device, and subagents run on their own threads.
         # Without this lock two overlapping requests would interleave on the wire and the
@@ -182,12 +205,32 @@ class CommandDispatcher:
     def simulated(self):
         return getattr(self._client, "simulated", False)
 
-    def _dispatch_agent(self, command, call_args):
-        """Agent-layer commands that run as a Python orchestration on the desktop.
+    def dispatch(self, name, call_args=None, on_subagent_event=None):
+        """Returns a dict, the shape Gemini expects as a tool response.
 
-        They still reach the Flipper, but through several device commands orchestrated
-        in Python rather than a single CFP frame. This is the non-subagent kind of
-        agent command: it is a function here, not a separate model conversation.
+        on_subagent_event(kind, **fields) is forwarded to a summoned subagent (or to the
+        app builder, which speaks the same event vocabulary), so its progress can be
+        shown while it works instead of only once it has finished.
+        """
+        command = self._by_tool_name.get(name)
+        if command is None:
+            return self._result({"status": "error", "error": f"unknown command: {name}"})
+
+        if command.get("layer") == "agent":
+            # The 'subagent' field is the discriminator: a command that names one delegates
+            # to it; one that does not runs desktop Python here (IR bruteforce, app builder).
+            if command.get("subagent"):
+                return self._dispatch_subagent(command, call_args or {}, on_subagent_event)
+            return self._result(self._dispatch_agent(command, call_args or {}, on_subagent_event))
+        return self._device_request(command, call_args or {})
+
+    def _dispatch_agent(self, command, call_args, on_event=None):
+        """Agent-layer commands without a subagent, run here on the desktop.
+
+        They still reach the Flipper, but through several device commands orchestrated in
+        Python rather than a single CFP frame. on_event, when given, receives the same
+        (kind, **fields) progress vocabulary the subagents use, so the app builder's
+        three-way debate can appear in the reasoning chain exactly like a delegation.
         """
         if command["name"] == "agent.remember":
             if self.memory is None:
@@ -197,39 +240,81 @@ class CommandDispatcher:
         if command["name"] == "agent.ir_control":
             from ir_bruteforce import bruteforce
 
-            args = call_args or {}
-            request = args.get("request", "")
+            request = call_args.get("request", "")
             if not request:
                 return {"status": "error", "error": "the 'request' argument is required"}
             return bruteforce(
                 self._client,
                 request,
-                brand=args.get("brand"),
-                device_type=args.get("device_type"),
-                function=args.get("function"),
+                brand=call_args.get("brand"),
+                device_type=call_args.get("device_type"),
+                function=call_args.get("function"),
                 on_progress=self._on_progress,
-                force_online=bool(args.get("search_online")),
+                force_online=bool(call_args.get("search_online")),
+            )
+
+        if command["name"] == "agent.replay_subghz":
+            return self._replay_subghz(call_args)
+
+        if command["name"] == "agent.run_script":
+            from scripting import run_script
+
+            # The script reaches the device only through dispatch_device (this same
+            # dispatcher), so it is logged, simulated-marked and confined to device commands
+            # exactly like a subagent. No progress callback is wired here: _on_progress is
+            # the IR bruteforce's (sent, total) reporter, a different shape, and the script's
+            # per-command evidence already tells the model what it did.
+            return run_script(
+                call_args.get("code", ""),
+                self,
+                purpose=call_args.get("purpose", ""),
+                timeout=call_args.get("timeout"),
+            )
+
+        if command["name"] in ("agent.build_flipper_app", "agent.edit_flipper_app"):
+            from app_builder import AppBuilder
+
+            builder = AppBuilder(self, simulated=self.simulated)
+            if command["name"] == "agent.build_flipper_app":
+                return builder.build(
+                    call_args.get("request", ""),
+                    app_name=call_args.get("app_name"),
+                    emit=on_event,
+                )
+            return builder.edit(
+                call_args.get("appid") or call_args.get("app_name") or "",
+                call_args.get("change_request", ""),
+                emit=on_event,
             )
 
         return {"status": "error", "error": f"agent command not implemented: {command['name']}"}
 
-    def dispatch(self, name, call_args=None, on_subagent_event=None):
-        """Returns a dict, the shape Gemini expects as a tool response.
+    def _replay_subghz(self, call_args):
+        """Replays a previously captured Sub-GHz signal, named descriptively rather than by path.
 
-        on_subagent_event(kind, **fields) is forwarded to a summoned subagent, so its
-        progress can be shown while it works instead of only once it has finished.
+        The listener saves each harvest as a descriptively named .sub in the apps_assets store;
+        replay refers to one the way the user would ('replay the doorbell one'), so this resolves
+        that name to the file on disk, then sends the device-layer subghz.replay with the real
+        path. Resolution is deliberately strict: an ambiguous or unknown name is reported back,
+        with the available captures listed, rather than guessed at - replaying the wrong signal is
+        exactly the mistake to avoid. This is an OFFENSIVE action (the radio transmits); the model
+        is instructed by the catalog to confirm the user's authorization before calling it.
         """
-        command = self._by_tool_name.get(name)
-        if command is None:
-            return self._result({"status": "error", "error": f"unknown command: {name}"})
+        from subghz_store import SubGhzStore
 
-        if command.get("layer") == "agent":
-            # Two kinds of agent command: those backed by a subagent (a separate model
-            # conversation) carry a 'subagent' field; the rest are Python orchestrations.
-            if command.get("subagent"):
-                return self._dispatch_subagent(command, call_args or {}, on_subagent_event)
-            return self._result(self._dispatch_agent(command, call_args or {}))
-        return self._device_request(command, call_args or {})
+        name = (call_args.get("name") or "").strip()
+        if not name:
+            return {"status": "error", "error": "the 'name' argument (the capture to replay) is required"}
+        try:
+            stem, path = SubGhzStore().resolve(name)
+        except LookupError as exc:
+            return {"status": "error", "error": str(exc)}
+
+        outcome = self.dispatch_device("subghz_replay", {"file": str(path)})
+        if outcome.get("status") == "ok":
+            outcome["replayed"] = stem
+            outcome["path"] = str(path)
+        return outcome
 
     def dispatch_device(self, name, call_args=None):
         """The device-only path, used by subagents.
@@ -242,6 +327,21 @@ class CommandDispatcher:
         if command is None or command.get("layer") != "device":
             return self._result({"status": "error", "error": f"unknown device command: {name}"})
         return self._device_request(command, call_args or {})
+
+    def dispatch_skill(self, name, call_args=None):
+        """A subagent's skill call, routed to the desktop function behind it.
+
+        The skill counterpart of dispatch_device: it reaches skills.py rather than the
+        Flipper, and it too refuses anything it does not recognise, so a subagent stays
+        confined to the capabilities it was granted. The call is recorded in the session log
+        like a device command, so what a subagent searched is as visible as what it measured.
+        """
+        from skills import dispatch_skill as run_skill
+
+        args = call_args or {}
+        outcome = self._result(run_skill(name, args))
+        self._record(name, args, outcome)
+        return outcome
 
     def _device_request(self, command, call_args):
         args = self._positional_args(command, call_args)

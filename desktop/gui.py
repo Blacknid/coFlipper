@@ -1571,6 +1571,8 @@ class CoFlipperWindow:
                 self.flipper = LiveDevice()
                 status = "se caută dispozitivul..."
 
+            # on_progress keeps the window alive while a long agent command runs (the IR
+            # bruteforce, the app build): without it the window would look frozen.
             self.dispatcher = CommandDispatcher(
                 commands, self.flipper, on_progress=self._on_ir_progress, memory=self.memory
             )

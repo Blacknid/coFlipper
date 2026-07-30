@@ -41,7 +41,8 @@ from agent import (
     send_with_retry,
     thought_texts,
 )
-from commands import build_tool, tool_name
+from commands import build_skill_tool, build_tool, tool_name
+from skills import SKILLS, skill_specs
 
 # By default a subagent runs on the same model as the conversation. Pointing it at
 # another one gives it a separate free-tier quota, which is worth doing for a public
@@ -81,6 +82,11 @@ class Spec:
     # which is the point for the analyst: a subagent that only reads cannot disturb the
     # radio, and it cannot be the source of a fabricated measurement either.
     tools: tuple = ()
+    # Skills this subagent may call: desktop capabilities (defined in skills.py), granted
+    # the same way device tools are. The audit subagent is given the file-search skills and
+    # NO device tools, so it can search the project's own files without ever touching the
+    # radio. A device subagent leaves this empty, and vice versa.
+    skills: tuple = ()
     # Upper bound on rounds of dialogue with the model. Reached, the subagent stops and
     # reports what it has. Without it, a subagent that keeps deciding it needs one more
     # measurement could consume the whole daily quota on its own.
@@ -110,6 +116,89 @@ such.
 
 Take as many readings as the task requires, but no more than you need: every reading is
 a command on a physical device, and every round of measurements costs a request.""",
+)
+
+LISTENER = Spec(
+    key="listener",
+    name="listener",
+    role="listens on one frequency over a window and harvests every distinct Sub-GHz signal it decodes, saving each one",
+    tools=("ping", "info", "subghz.rssi", "subghz.read"),
+    skills=("save_subghz", "list_subghz"),
+    max_rounds=12,
+    instruction="""Your speciality is harvesting Sub-GHz signals from the air on one
+frequency, over a stretch of time, and reporting the DISTINCT devices you heard.
+
+The main agent gives you a frequency (in Hz) and a listening window (in seconds). The air
+on a busy ISM frequency like 433.92 MHz is shared: several unrelated devices transmit on
+it - a gate remote, an electric relay, a doorbell, a weather sensor - and a single capture
+catches whichever happened to fire at that instant. Your job is to listen repeatedly across
+the whole window and build the LIST of everything that showed up, not to stop at the first
+code.
+
+How you work:
+1. Optionally take one subghz.rssi reading first to confirm there is activity at all; if the
+   frequency is plainly dead (well below about -90 dBm), say so and stop - there is nothing
+   to harvest.
+2. Call subghz.read on the frequency, in a loop, until the window is used up or reads stop
+   returning new signals. Each read decodes at most one signal.
+   - A result beginning 'signal' carries: protocol, key, bit-length, the frequency actually
+     synthesised, and RSSI, in that order.
+   - A result of 'no_signal' means that read timed out with nothing decoded. A couple of
+     consecutive 'no_signal's means the air has gone quiet: stop, do not keep burning reads.
+3. DEDUPLICATE. The same device often repeats; treat two captures with the same protocol
+   AND the same key as one device, not two. What you report is the set of DISTINCT signals.
+4. For each distinct signal, name what it plausibly is from its protocol and frequency - a
+   fixed-code doorbell, a rolling-code car fob, a relay/actuator, a weather sensor - and say
+   plainly it is a guess, not a certainty. The protocol narrows it but rarely pins the brand.
+5. SAVE each distinct signal with save_subghz, passing the frequency, protocol, key, bits,
+   rssi and - importantly - your plain-English guess as 'guess'. The guess goes into the
+   file's name, which is what makes the capture findable later, so make it specific ('a
+   wireless doorbell remote', not just 'a remote'). Save once per distinct device, not once
+   per read.
+
+Read every field from a tool result - never invent a protocol, key or RSSI. Every read is a
+command on a physical radio and costs part of your round budget, so listen as long as the
+window and the traffic warrant, and no longer. End with the harvested list: for each device,
+its protocol, key, RSSI, your one-line guess at what it is, and the name it was saved
+under.""",
+)
+
+WATCHER = Spec(
+    key="watcher",
+    name="watcher",
+    role="waits on one frequency for a bounded window and reports the first Sub-GHz signal it decodes",
+    tools=("ping", "info", "subghz.rssi", "subghz.read"),
+    max_rounds=10,
+    instruction="""Your speciality is WAITING for a Sub-GHz signal that has not been sent
+yet. The main agent summons you when the user is about to play or trigger a signal ('a
+signal is going to be played shortly', 'watch for the fob'), and your job is to catch the
+first real transmission and report it at once.
+
+This is not harvesting. You are not building a list of everything on the band - you are
+waiting for ONE thing to happen and reacting to it. Stop the moment you have it.
+
+The main agent gives you a frequency (in Hz) and a window (in seconds). How you work:
+1. Optionally take one subghz.rssi reading to note the resting background level, so the
+   arriving signal can be told apart from it. This is not required - do not spend more than
+   one reading on it.
+2. Call subghz.read on the frequency, in a loop. Each read waits a short moment for a decode.
+   - The instant a read returns a result beginning 'signal' - carrying protocol, key,
+     bit-length, the frequency actually synthesised and RSSI - you STOP. Do not read again:
+     the thing you were waiting for has arrived, and continuing only burns budget.
+   - A result of 'no_signal' means that read window passed with nothing on the air. That is
+     the EXPECTED case while you wait, not a reason to stop: keep reading until either a
+     signal arrives or your round budget is spent.
+3. When a signal arrives, report it: the protocol, key, bit-length and RSSI exactly as the
+   read returned them, plus a plain-English guess at what the device plausibly is (a doorbell,
+   a car fob, a relay, a sensor), stated as a guess. Say clearly that the signal WAS heard.
+4. If the whole window passes with only no_signal, report plainly that NOTHING was heard in
+   the window - do not invent a signal to fill the silence, and do not claim the frequency is
+   dead (the sender may simply not have played it in time). Suggest the window may have been
+   too short, or the wrong frequency.
+
+Read every field from a real tool result - never invent a protocol, key or RSSI. Every read
+is a command on a physical radio and costs part of your budget, so keep reading while the
+window lasts, and stop the instant a signal lands.""",
 )
 
 ANALYST = Spec(
@@ -167,7 +256,41 @@ its index, channel and encryption; if it does not appear, say so rather than gue
 with the few access points or stations that best match what the main agent asked for.""",
 )
 
-SPECS = {spec.key: spec for spec in (SCANNER, ANALYST, WIFI_RECON)}
+AUDIT = Spec(
+    key="audit",
+    name="audit",
+    role="searches the project's generated-app files on disk, without touching the device",
+    tools=(),
+    skills=("list_app_store", "search_app_store"),
+    max_rounds=6,
+    instruction="""Your speciality is searching the coFlipper project's own files - the
+Flipper apps that have been generated and saved to disk - to answer a question about them.
+
+You have file-search skills only, and NO device tools of any kind. You cannot measure a
+frequency, scan for networks or transmit anything, and you must not claim to: your entire
+world is the files on disk. Everything you report comes from a skill result, never from
+guessing what an app probably contains.
+
+The generated apps live in a store, one directory per app, each with: the editable C
+source, the FAP manifest, the last build log, and one history record per build or edit.
+Your skills:
+- list_app_store: the apps that exist, with their build status. Start here when the
+  question is open ('what have I built?', 'which apps are there?') or when you do not yet
+  know which app to search into.
+- search_app_store: a case-insensitive substring search across those files. Each hit names
+  the app, which file it was found in (source, manifest, build_log, history), the line
+  number and a snippet. Pass an appid to confine the search to one app.
+
+Work in order: if you already know the app, search it directly; otherwise list first, then
+search. Choose search terms that actually appear in the files - a Flipper C source uses
+identifiers like InputKeyOk, furi_, canvas_draw_, view_port_, and a failed build log
+contains 'error:'. If a search returns nothing, say so plainly rather than inventing a
+match. If a result is marked truncated, narrow the query or scope it to one app and search
+again. End with a short, factual answer to the question, citing the app ids and files the
+finding rests on.""",
+)
+
+SPECS = {spec.key: spec for spec in (SCANNER, LISTENER, WATCHER, ANALYST, WIFI_RECON, AUDIT)}
 
 
 class SubagentRunner:
@@ -198,13 +321,25 @@ class SubagentRunner:
             if command["name"] in spec.tools
         ]
 
+    def _allowed_skills(self, spec):
+        """The skill names this subagent actually receives.
+
+        A name in spec.skills that skills.py does not define cannot be granted, so it is
+        dropped here - the same guarantee _allowed() gives for device tools: the interface
+        never promises a capability the subagent did not get.
+        """
+        return [name for name in spec.skills if name in SKILLS]
+
     def describe(self, key):
         """What the interface announces when this subagent is summoned."""
         spec = SPECS[key]
+        device_tools = [tool_name(command["name"]) for command in self._allowed(spec)]
         return {
             "role": spec.role,
             "model": self.model,
-            "tools": [tool_name(command["name"]) for command in self._allowed(spec)],
+            # Device tools and skills are announced together: to the user they are both
+            # 'the tools this subagent was given', regardless of which layer serves them.
+            "tools": device_tools + self._allowed_skills(spec),
             "max_rounds": spec.max_rounds,
         }
 
@@ -214,11 +349,17 @@ class SubagentRunner:
             instruction += SIMULATED_NOTICE
 
         allowed = self._allowed(spec)
+        skills = self._allowed_skills(spec)
+        tools = []
+        if allowed:
+            tools.append(build_tool(allowed))
+        if skills:
+            tools.append(build_skill_tool({name: SKILLS[name] for name in skills}))
         return self._genai.chats.create(
             model=self.model,
             config=types.GenerateContentConfig(
                 system_instruction=instruction,
-                tools=[build_tool(allowed)] if allowed else None,
+                tools=tools or None,
                 thinking_config=(
                     types.ThinkingConfig(include_thoughts=True) if INCLUDE_THOUGHTS else None
                 ),
@@ -247,6 +388,7 @@ class SubagentRunner:
 
         announce("spawn", name=spec.name, task=task, meta=self.describe(key))
 
+        skill_names = set(self._allowed_skills(spec))
         chat = self._chat(spec)
         evidence = []
         rounds = 0
@@ -282,7 +424,13 @@ class SubagentRunner:
             results = []
             for call in response.function_calls:
                 args = dict(call.args or {})
-                outcome = self._dispatcher.dispatch_device(call.name, call.args)
+                # A granted skill is a desktop capability, routed to dispatch_skill; anything
+                # else is a device command. Routing by the granted set, not by guessing from
+                # the name, is what keeps a subagent to exactly the tools it was announced.
+                if call.name in skill_names:
+                    outcome = self._dispatcher.dispatch_skill(call.name, args)
+                else:
+                    outcome = self._dispatcher.dispatch_device(call.name, call.args)
                 announce("tool", name=call.name, args=args, outcome=outcome, source=spec.name)
                 evidence.append({"command": call.name, "args": args, "result": outcome})
                 results.append(

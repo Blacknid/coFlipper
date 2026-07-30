@@ -111,14 +111,18 @@ The first is long work. Measuring one frequency is a single command, but establi
 
 The second is research over material already gathered. Every command the session has executed on the device is recorded in a log, and questions about it ("what have we measured so far?", "which commands failed?") need no hardware access at all, only reading.
 
-So the agent can delegate. A subagent is a separate conversation with the model: its own system instruction, its own tool list, its own round budget. It carries out one bounded task and reports back to the agent that summoned it. Two exist:
+So the agent can delegate. A subagent is a separate conversation with the model: its own system instruction, its own tool list, its own round budget. It carries out one bounded task and reports back to the agent that summoned it. Several exist:
 
 | Subagent | Role | Tools |
 |---|---|---|
 | scanner | measures the radio spectrum over several successive readings | `ping`, `info`, `subghz.rssi` |
+| listener | harvests every distinct Sub-GHz signal on a frequency across a window | `ping`, `info`, `subghz.rssi`, `subghz.read` + save/list skills |
+| watcher | waits on a frequency for a bounded window and reports the first signal that arrives | `ping`, `info`, `subghz.rssi`, `subghz.read` |
 | analyst | researches the session log | none |
 
 The analyst having no tools at all is deliberate, not an omission. A subagent that can only read cannot disturb the radio, and it cannot be the source of a fabricated measurement either: everything it says has to be traceable to a line of the log it was given.
+
+The listener and the watcher look alike - both read Sub-GHz over a window - but their intent is opposite, and that is why they are two specialists rather than one. The listener surveys what is ALREADY on a busy band and harvests the whole list, saving each distinct device; it is the answer to "what is transmitting here?". The watcher WAITS for a signal that has not been sent yet and reacts to the first one, stopping the instant it hears it; it is the answer to "a signal is about to be played, catch it". A watcher that kept reading to build a list, or a listener that stopped at the first code, would each be doing the other's job badly.
 
 Delegation is described in `commands.json` like everything else, under `"layer": "agent"`, with a `subagent` field naming the specialist and a `task` field phrasing the job in words. The catalog therefore remains the single source of truth: adding a delegated capability means describing it there, not changing the agent's code.
 
@@ -163,6 +167,18 @@ The second is the choice of model. The free-tier quota is counted separately per
     python gui.py
 
 Subagents run one at a time, deliberately. Running them in parallel would buy little here — there is a single radio in the device, so measurements have to be serialised anyway — while multiplying the risk of hitting the per-minute rate limit. The device access they do share is guarded by a lock, since a single serial port serves the Flipper and two overlapping requests would desynchronise the protocol, matching responses to the wrong command.
+
+## Building Flipper apps
+
+The agent can build actual native Flipper Zero applications on request ("build me a simple paint app"). This is not a single model writing some C and hoping: three separate agents debate it — a proposer that researches the task and writes the source, a challenger that argues against the design, and an arbiter that keeps only what survives the argument — after which the result is compiled with `ufbt` and, if a device is attached, installed. Compiler errors are fed back into the debate to be fixed, the generated source is saved and stays editable ("add a bigger brush to the paint app"), and the whole debate appears nested in the reasoning chain. It reports the real compiler result and never claims an app built or installed unless the toolchain confirmed it. This is implemented in `app_builder.py`, `app_store.py` and `ufbt_runner.py`, and documented in full in [/APP_BUILDER.md](../APP_BUILDER.md).
+
+## Temporary scripts
+
+The catalog commands cover the operations the project anticipated, and the subagents cover the recurring shapes of long work (harvest a band, wait for a signal, survey Wi-Fi). But an agent driving a device keeps meeting one-off cases no single command captures: poll a frequency until a value settles, chain a few reads under a condition, time a sequence, retry until something happens, compute a figure across several readings. Rather than grow a new catalog entry for each, the agent can write a **short Python script for exactly the case in front of it** and run it once, through `agent_run_script`. The watcher subagent above is the pre-built answer to one such case ("a signal is about to be played"); `agent_run_script` is the general tool for the cases there is no specialist for.
+
+Letting a model run code it wrote is the most dangerous thing the system could do, so it rests on two walls. The script runs in a **separate Python process**, started in isolated mode (`-I`) with a hard wall-clock timeout the parent enforces by killing the child — a script that loops forever cannot hang the application, it is stopped and reported as timed out. And inside that process the script reaches **almost nothing**: a restricted builtins map (no `open`, `eval`, `exec`, `compile`, `input`), an allowlist of harmless stdlib modules (`time`, `math`, `json`, `random`, `statistics`) enforced by a guarded `__import__`, and one capability that matters — a `flipper` object whose single method `request()` is the only way out of the sandbox. No filesystem, no network, no `os`, no `subprocess`.
+
+Crucially, the child process holds no device connection. Each `flipper.request()` is marshalled back over the pipe to the **parent**, executed there through the same `CommandDispatcher.dispatch_device` a subagent uses — so it is logged, marked when simulated, and confined to device-layer commands (a script can no more summon a subagent or transmit an un-authorized command than a subagent can) — and only the result crosses back. The parent stays the sole holder of the one door to the hardware. The result handed to the model carries the script's printed output *and* the recorded list of every device command it ran, so the model checks the script's claims against the real readings exactly as it does a subagent's evidence, never against the printed text alone. A transmitting command sent from a script is still offensive, and the model is instructed to run the authorization gate before any script that transmits. This lives in `scripting.py`.
 
 ## The graphical interface
 
@@ -238,6 +254,10 @@ It can also be used as a module, which is how `agent.py` obtains its client:
 | agent.py | the agent proper: the conversation loop and orchestration of tool calls |
 | reasoning.py | the reasoning chain: the steps of a turn, in the order they happened |
 | subagents.py | the subagents: specialised assistants the main agent delegates to |
+| app_builder.py | the app builder: the three-way proposer/challenger/arbiter debate that writes, compiles and installs a Flipper app |
+| app_store.py | the persistent, editable store of generated apps (source, manifest, build history) |
+| ufbt_runner.py | the compile/install wrapper around ufbt, run as a subprocess so real compiler output can be captured |
+| scripting.py | the sandboxed runner for the agent's temporary scripts: a locked-down subprocess with device access but no filesystem, network or shell |
 | merge.py | the synthesiser that merges the results of several parallel chats into one |
 | memory.py | the agent's persistent memory: durable facts kept across sessions on disk |
 | voice.py | microphone capture for spoken messages, packed into a WAV the model hears directly |
@@ -253,6 +273,7 @@ It can also be used as a module, which is how `agent.py` obtains its client:
 | scripted_model.py | a scripted stand-in for the model, so the tests need no API requests |
 | test_reasoning.py | checks the construction of the reasoning chain |
 | test_subagents.py | checks delegation, the session log and the round budget |
+| test_app_builder.py | checks the app-builder debate, the compile-error feedback loop, budgets, honesty and persistence |
 | test_gemini.py | a minimal check of the connection to the Gemini API |
 | list_models.py | lists the models available to the configured key |
 
@@ -271,16 +292,23 @@ The graphical interface was verified separately, with the simulated device: conn
 
 Memory and context management were verified against the real Gemini API too. Persistent memory: the agent, told a durable fact in one chat, saved it through `agent_remember`, and a brand-new chat — a separate conversation — recalled it from the loaded memory. Context compaction: a chat driven past a lowered turn budget was compacted, its history shrinking to a summary plus the recent turns while it kept answering coherently, and the summary preserved the facts rather than dropping them.
 
+<<<<<<< HEAD
 Voice input was verified against the real Gemini API end to end: a spoken message ("turn off my Samsung television") was captured to a WAV and sent as audio, with no text alongside it. The model transcribed the speech on its own and answered in the same turn — it called `agent_ir_control` with `brand=samsung`, `device_type=tv`, `function=power`, ran the IR attempt on the simulated device, and phrased the result honestly, noting the simulated mode. The plumbing around it is covered without quota by a scripted test: the audio reaches the model only on the first round and never again on the tool-response rounds, a text turn still sends a plain string, and `voice.py` produces a 16 kHz mono WAV of the expected length.
 
 Two test suites cover the parts that can be checked without hardware and without the API. Both run in under a second and can be repeated freely, since the model is replaced by a scripted set of responses:
+=======
+Three test suites cover the parts that can be checked without hardware and without the API. They run quickly and can be repeated freely, since the model is replaced by a scripted set of responses:
+>>>>>>> 0c0c358e70bb44ac6171d5e93362536b524f3971
 
     python test_reasoning.py     # 22 checks
     python test_subagents.py     # 38 checks
+    python test_app_builder.py   # 27 checks — the three-agent app builder
 
 `test_reasoning.py` covers the order of the steps across several rounds, the fact that every step reaches the display immediately, the separation of reasoning summaries from the answer text, the marking of simulated results, a turn in which the command fails, the case of a model that produces no reasoning summaries, and the cleaning up of Markdown markup.
 
 `test_subagents.py` covers a full delegation: what is announced when a subagent is summoned, the nesting and attribution of its steps, the fact that the analyst receives the session log and no tools, the report and the raw evidence handed back, the refusal of a subagent's attempt to summon another subagent, and the round budget — both when the subagent complies with the order to report and when it ignores it. Two further checks guard the edges: a session with no subagent runner attached must still execute device commands normally, and twelve commands issued from twelve threads at once must reach the device one at a time. That last one is not hypothetical — in a real run the scanner asked for five readings within a single round, and the model is free to do so.
+
+`test_app_builder.py` covers the three-agent app builder with its conversations scripted and `ufbt` replaced by a fake build runner: a clean build (the debate is nested and attributed, the compiler is really invoked), persistence and editing (the source and manifest are written, and an edit reloads the existing source into the debate), the compile-error feedback loop (a real compiler error reaches the next round's prompt), the honesty guarantee (a build that never compiles is never reported as built), and the request budget (a debate scripted to run forever is stopped by the ceiling). The compile path itself — the part the fake runner cannot prove — was verified separately against the real `ufbt`, which compiled a generated minimal app to an actual `.fap`. See [/APP_BUILDER.md](../APP_BUILDER.md).
 
 The suites are worth more than the count of checks suggests: writing them found two real defects. The round budget originally kept re-issuing its request to a subagent that ignored it, which would have consumed the whole daily quota on a single stubborn subagent; and one test double initially let reasoning text leak into the response's `text` field, which sent us to read the SDK's own implementation and confirm that it skips reasoning parts — the behaviour our answer-rebuilding relies on.
 

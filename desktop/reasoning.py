@@ -74,9 +74,8 @@ class Step:
         if self.kind != TOOL:
             return ""
         if self.ok:
-            # Device commands return 'data'; some agent-layer commands (e.g. the IR
-            # bruteforce) return a summary of their own instead, so we show whichever
-            # is present.
+            # Device commands return 'data'; agent commands (the IR bruteforce, the app
+            # builder) return a summary of their own, so we show whichever exists.
             if "data" in self.outcome:
                 summary = " ".join(self.outcome.get("data") or [])
             else:

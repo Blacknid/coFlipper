@@ -1,9 +1,9 @@
 """A simulated Flipper, with the same interface as CFPClient.
 
 Used for developing and testing the agent without the physical device connected.
-Responds like the real firmware: the commands it implements succeed (ping, info,
-subghz.rssi and the ir.* commands), the commands marked as stubs answer ERR
-not_implemented, and anything else gets ERR unknown_command.
+Responds like the real firmware: only the commands the firmware implements succeed
+(ping, info, subghz.rssi, subghz.read, subghz.replay and the ir.* bruteforce commands),
+commands marked as stubs answer ERR not_implemented, anything else gets ERR unknown_command.
 
 The Wi-Fi/BLE commands (categories 'wifi' and 'ble' in commands.json) are served here by
 a small Marauder simulator, so the whole Wi-Fi feature - scanning, listing, selecting a
@@ -29,11 +29,11 @@ IMPLEMENTED = {
 }
 
 # Commands the firmware recognises but has not implemented yet: they answer
-# not_implemented, not unknown_command, so the agent sees the same distinction as on the
-# real device.
+# not_implemented rather than unknown_command, so the agent sees the same distinction it
+# would on the real device.
 STUBS = ("subghz.info", "ir.info", "nfc.info")
 
-# The IR bruteforce commands served with simulated state by _ir_request.
+# The IR bruteforce commands, served with simulated state by _ir_request.
 IR_COMMANDS = ("ir.reset", "ir.queue", "ir.bruteforce", "ir.status")
 
 # The bands the device's CC1101 transceiver is able to work in. The firmware rejects any
@@ -57,6 +57,36 @@ SUBGHZ_STEP_HZ = 397
 # premise was never exercised without hardware.
 # The sequence is fixed rather than random, so two runs of the test suite still agree.
 SUBGHZ_JITTER = (0, -12, 7, -4, 15, -9, 3, -6)
+
+# The Sub-GHz "neighbourhood" subghz.read decodes, keyed by the ISM band the requested
+# frequency falls in. Each tuple is one device the Flipper's CC1101 can pick up and decode:
+# (protocol, key, bit-length, rssi dBm, a plain-English guess at the source). Deterministic,
+# like the Wi-Fi fixtures, so the listener subagent harvests the same set every run and the
+# feature is testable. The point of having SEVERAL per band is exactly the user's scenario:
+# on 433.92 MHz an electric relay and a doorbell remote are both in the air, and successive
+# reads surface them in turn - so the listener ends up with a LIST, not a single code.
+#
+# The keys are obviously invented (round hex), so no real remote's rolling code is implied;
+# nothing here is transmitted, and every result reaches the model marked 'simulated'.
+_SUBGHZ_SIGNALS = {
+    # 300-348 MHz band: mostly older car fobs / tyre-pressure sensors.
+    (300_000_000, 348_000_000): (
+        ("CAME", "0x1A2B3C", 12, -58, "a gate/garage remote (CAME 12-bit)"),
+        ("Princeton", "0x00C4D2", 24, -71, "a fixed-code remote (PT2262-style)"),
+    ),
+    # 387-464 MHz band: the busy 433.92 MHz ISM band - remotes, sensors, doorbells.
+    (387_000_000, 464_000_000): (
+        ("Nice_FloR_S", "0x3F7A11", 52, -49, "an electric relay / rolling-code actuator"),
+        ("Princeton", "0x4E7B90", 24, -62, "a wireless doorbell remote"),
+        ("KeeLoq", "0x9C1122AB", 66, -55, "a car key fob (KeeLoq rolling code)"),
+        ("Weather_Station", "0xA1B2C3", 40, -78, "an outdoor weather-station sensor"),
+    ),
+    # 779-928 MHz band: 868/915 MHz - alarms, meters, industrial telemetry.
+    (779_000_000, 928_000_000): (
+        ("Somfy_Telis", "0x77E0FF", 56, -60, "a motorised-blind remote (Somfy 868 MHz)"),
+        ("LoRa_Meter", "0x55AA33", 48, -83, "a smart utility meter (868 MHz telemetry)"),
+    ),
+}
 
 
 # A fixed, fictitious Wi-Fi neighbourhood the Marauder simulator hands out. Deterministic
@@ -426,6 +456,11 @@ class MockCFPClient:
         self.calls = []
         # How many readings have been taken per frequency, which selects the jitter.
         self._readings = {}
+        # How many signals subghz.read has already decoded per frequency, which selects
+        # the next one from that band's fixture list. Each read advances the cursor, so a
+        # subagent listening across a window harvests the band's devices one after another
+        # instead of the same code over and over.
+        self._read_cursor = {}
         # Serves every wifi.*/ble.* command, holding the same state the real board would.
         self._marauder = MarauderSim()
         # IR bruteforce state, mirroring CfpIrState in the firmware.
@@ -498,6 +533,10 @@ class MockCFPClient:
             return self._ir_request(cmd, args)
         if cmd == "subghz.rssi":
             return self._subghz_rssi(args)
+        if cmd == "subghz.read":
+            return self._subghz_read(args)
+        if cmd == "subghz.replay":
+            return self._subghz_replay(args)
         # The Wi-Fi dev board is served by its own simulator. On real hardware these travel
         # on to the ESP32 over UART; here they are answered locally, with the same state a
         # real board would carry across commands.
@@ -527,3 +566,56 @@ class MockCFPClient:
         # The division is done on the positive value: for negative numbers, // rounds
         # downwards and would turn -75.5 dBm into -76.5 dBm.
         return [str(actual), f"-{decidbm // 10}.{decidbm % 10}"]
+
+    def _subghz_read(self, args):
+        """One decoded Sub-GHz signal on a frequency, or a timeout if the air is quiet.
+
+        args: frequency [, timeout_ms]. The timeout is accepted and ignored by the
+        simulator (there is no real radio to wait on), but a subagent still passes it,
+        so the real firmware and the mock take the same call.
+
+        Successive reads of the same frequency walk that band's fixture list, one signal
+        per call, so a listener collects the band's several devices in turn. When the list
+        is spent the read returns 'no_signal' rather than repeating - the air has, for the
+        purposes of this simulated run, gone quiet, which is the honest thing to report and
+        also what makes the listener stop instead of looping to its budget.
+        """
+        if not args:
+            raise CFPError("missing_frequency")
+        try:
+            frequency = int(args[0])
+        except ValueError:
+            raise CFPError("invalid_frequency")
+        band = next(
+            (b for b in SUBGHZ_BANDS if b[0] <= frequency <= b[1]), None
+        )
+        if band is None:
+            raise CFPError("invalid_frequency")
+
+        signals = _SUBGHZ_SIGNALS.get(band, ())
+        index = self._read_cursor.get(band, 0)
+        self._read_cursor[band] = index + 1
+        if index >= len(signals):
+            # Nothing left to decode in this band this run.
+            return ["no_signal"]
+
+        protocol, key, bits, rssi, _guess = signals[index]
+        actual = frequency - frequency % SUBGHZ_STEP_HZ
+        # 'signal' marks a decode, distinguishing it from the 'no_signal' timeout above; the
+        # fields after it are protocol / key / bit-length / frequency actually synthesised /
+        # RSSI, in the fixed order the client and the subagent agree on.
+        return ["signal", protocol, key, str(bits), str(actual), str(rssi)]
+
+    def _subghz_replay(self, args):
+        """Retransmit a saved .sub file. Offensive: on real hardware this keys the radio.
+
+        args: the path to the .sub file. The simulator transmits nothing (there is no radio),
+        it only confirms which file it would have sent, echoing the path back so the agent can
+        show the user exactly what was replayed. The firmware would read the file's Frequency
+        and Key and re-emit it; here we only acknowledge, and the result is marked simulated
+        upstream, so it can never be mistaken for a real transmission.
+        """
+        if not args:
+            raise CFPError("missing_file")
+        path = str(args[0])
+        return ["replayed", path, "authorized_use_only"]
