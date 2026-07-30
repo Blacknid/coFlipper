@@ -25,17 +25,30 @@ Orice altă linie primită pe port (bannerul CLI, prompt-ul `>: `, log-uri) nu �
     > cfp 1 ping
     < CFP/1 1 OK pong
 
-    > cfp 2 subghz.info
-    < CFP/1 2 ERR not_implemented
+    > cfp 2 subghz.rssi 433920000
+    < CFP/1 2 OK 433919830 -75.0
 
-## Comenzi definite momentan
+    > cfp 3 subghz.rssi 999999999
+    < CFP/1 3 ERR invalid_frequency
 
-| Comandă      | Argumente | Descriere                                        | Stadiu      |
-|--------------|-----------|---------------------------------------------------|-------------|
-| ping         | —         | Verifică dacă serverul CFP răspunde               | implementat |
-| info         | —         | Numele/modelul dispozitivului                     | implementat |
-| subghz.info  | —         | Informații despre frecvența Sub-GHz curentă       | stub (TODO) |
-| ir.info      | —         | Informații despre ultimul semnal IR recepționat   | stub (TODO) |
-| nfc.info     | —         | Informații despre ultimul tag NFC citit           | stub (TODO) |
+## Comenzi implementate
 
-Comenzile marcate „stub" răspund în prezent cu `ERR not_implemented` și urmează să fie legate de modulele hardware reale (radio, IR, NFC) ale Flipper Zero, pe măsură ce implementarea avansează.
+| Comandă     | Argumente | Descriere                                                 |
+|-------------|-----------|-----------------------------------------------------------|
+| ping        | —         | Verifică dacă serverul CFP răspunde                        |
+| info        | —         | Numele/modelul dispozitivului                              |
+| subghz.rssi | frecvență | Nivelul de semnal (dBm) măsurat pe frecvența dată          |
+| exit        | —         | Închide aplicația CFP de pe dispozitiv (uz intern)         |
+
+Catalogul complet, incluzând comenzile aflate încă în stadiul de proiectare, se află în commands.json.
+
+O observație privind răspunsul comenzii `subghz.rssi`: prima valoare returnată nu este frecvența cerută, ci frecvența pe care sintetizatorul radio a reușit efectiv să o genereze. Diferența, de ordinul a câtorva sute de herți, provine din rezoluția finită a circuitului CC1101 și este raportată explicit pentru ca utilizatorul să știe pe ce s-a măsurat în realitate.
+
+## Coduri de eroare
+
+| Cod                | Semnificație                                                      |
+|--------------------|-------------------------------------------------------------------|
+| bad_frame          | Cadrul nu conține cel puțin un identificator și o comandă          |
+| unknown_command    | Comanda nu este recunoscută de dispozitiv                          |
+| missing_frequency  | Comanda necesită o frecvență, dar nu a primit niciun argument      |
+| invalid_frequency  | Frecvența nu se află în domeniile suportate de modulul radio       |

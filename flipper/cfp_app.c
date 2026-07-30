@@ -1,9 +1,11 @@
 #include <furi.h>
+#include <furi_hal_subghz.h>
 #include <furi_hal_version.h>
 #include <cli/cli.h>
 #include <gui/gui.h>
 #include <gui/view_port.h>
 #include <input/input.h>
+#include <subghz/devices/cc1101_configs.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,59 +15,123 @@
 
 /* Formatul protocolului CFP este documentat in /PROTOCOL.md, la radacina proiectului. */
 
-static void cfp_dispatch(uint32_t id, const char* cmd) {
+/* Durata totala de esantionare a nivelului de semnal, in pasi de CFP_RSSI_STEP_MS. */
+#define CFP_RSSI_SAMPLES 20
+#define CFP_RSSI_STEP_MS 5
+
+/* Masoara nivelul de semnal (RSSI) pe o frecventa data.
+   Radioul e configurat, ascultat scurt si eliberat la fiecare apel: comanda e
+   fara stare, ca sa nu blocheze modulul intre cereri. */
+static void cfp_cmd_subghz_rssi(uint32_t id, const char* freq_arg) {
+    if(!freq_arg) {
+        printf(CFP_VERSION " %lu ERR missing_frequency\r\n", id);
+        return;
+    }
+
+    uint32_t frequency = (uint32_t)strtoul(freq_arg, NULL, 10);
+
+    if(!furi_hal_subghz_is_frequency_valid(frequency)) {
+        printf(CFP_VERSION " %lu ERR invalid_frequency\r\n", id);
+        return;
+    }
+
+    /* Radioul intern e deja initializat de firmware la pornire; secventa de mai jos
+       (reset -> preset -> frecventa -> rx) e cea folosita si de aplicatiile stock. */
+    furi_hal_subghz_reset();
+    furi_hal_subghz_load_registers(subghz_device_cc1101_preset_ook_650khz_async_regs);
+    uint32_t actual = furi_hal_subghz_set_frequency_and_path(frequency);
+    furi_hal_subghz_rx();
+
+    float peak = -127.0f;
+    for(size_t i = 0; i < CFP_RSSI_SAMPLES; i++) {
+        furi_delay_ms(CFP_RSSI_STEP_MS);
+        float sample = furi_hal_subghz_get_rssi();
+        if(sample > peak) peak = sample;
+    }
+
+    furi_hal_subghz_idle();
+    furi_hal_subghz_sleep();
+
+    /* printf-ul din firmware nu formateaza float, deci separam manual
+       partea intreaga de zecimala (RSSI e negativ: -92.3 -> "-92" si "3"). */
+    int32_t decidbm = (int32_t)(peak * 10.0f);
+    int32_t whole = decidbm / 10;
+    int32_t fraction = decidbm % 10;
+    if(fraction < 0) fraction = -fraction;
+
+    printf(CFP_VERSION " %lu OK %lu %ld.%ld\r\n", id, actual, whole, fraction);
+}
+
+/* Inchide aplicatia de la distanta, trimitandu-i acelasi eveniment ca apasarea Back.
+   Fara asta, orice reinstalare cere apasarea fizica a butonului pe dispozitiv. */
+static void cfp_cmd_exit(uint32_t id, FuriMessageQueue* event_queue) {
+    printf(CFP_VERSION " %lu OK closing\r\n", id);
+    InputEvent event = {.key = InputKeyBack, .type = InputTypeShort};
+    furi_message_queue_put(event_queue, &event, 0);
+}
+
+static void cfp_dispatch(
+    uint32_t id,
+    const char* cmd,
+    const char* arg,
+    FuriMessageQueue* event_queue) {
     if(strcmp(cmd, "ping") == 0) {
         printf(CFP_VERSION " %lu OK pong\r\n", id);
     } else if(strcmp(cmd, "info") == 0) {
         printf(CFP_VERSION " %lu OK %s\r\n", id, furi_hal_version_get_model_name());
-    } else if(
-        strcmp(cmd, "subghz.info") == 0 || strcmp(cmd, "ir.info") == 0 ||
-        strcmp(cmd, "nfc.info") == 0) {
-        /* TODO: legate de modulele hardware reale (radio, IR, NFC). */
-        printf(CFP_VERSION " %lu ERR not_implemented\r\n", id);
+    } else if(strcmp(cmd, "subghz.rssi") == 0) {
+        cfp_cmd_subghz_rssi(id, arg);
+    } else if(strcmp(cmd, "exit") == 0) {
+        cfp_cmd_exit(id, event_queue);
     } else {
         printf(CFP_VERSION " %lu ERR unknown_command\r\n", id);
     }
 }
 
-/* Pipe-ul e instalat ca stdio al thread-ului comenzii, deci printf() scrie direct pe portul serial. */
+/* Separa cuvintele urmatoare din buffer, terminandu-le cu '\0'.
+   Returneaza inceputul cuvantului sau NULL cand nu mai urmeaza niciunul. */
+static char* cfp_next_token(char** cursor) {
+    char* pos = *cursor;
+    while(*pos == ' ')
+        pos++;
+    if(*pos == '\0') {
+        *cursor = pos;
+        return NULL;
+    }
+
+    char* token = pos;
+    while(*pos && *pos != ' ')
+        pos++;
+    if(*pos) {
+        *pos = '\0';
+        pos++;
+    }
+    *cursor = pos;
+    return token;
+}
+
 static void cfp_cli_callback(PipeSide* pipe, FuriString* args, void* context) {
     UNUSED(pipe);
-    UNUSED(context);
+    FuriMessageQueue* event_queue = context;
 
     char buffer[160];
     strncpy(buffer, furi_string_get_cstr(args), sizeof(buffer) - 1);
     buffer[sizeof(buffer) - 1] = '\0';
 
     /* strtok_r nu e disponibil in API-ul firmware-ului, deci separam manual
-       primele doua token-uri; buffer e o copie locala, deci o putem modifica. */
+       token-urile; buffer e o copie locala, deci o putem modifica. */
     char* cursor = buffer;
-    while(*cursor == ' ')
-        cursor++;
-    char* id_token = cursor;
+    char* id_token = cfp_next_token(&cursor);
+    char* cmd_token = cfp_next_token(&cursor);
+    char* arg_token = cfp_next_token(&cursor);
 
-    while(*cursor && *cursor != ' ')
-        cursor++;
-    char* cmd_token = NULL;
-    if(*cursor) {
-        *cursor++ = '\0';
-        while(*cursor == ' ')
-            cursor++;
-        if(*cursor) {
-            cmd_token = cursor;
-            while(*cursor && *cursor != ' ')
-                cursor++;
-            *cursor = '\0';
-        }
-    }
-
-    if(*id_token == '\0' || !cmd_token) {
+    if(!id_token || !cmd_token) {
         printf(CFP_VERSION " 0 ERR bad_frame\r\n");
         return;
     }
 
     uint32_t id = (uint32_t)strtoul(id_token, NULL, 10);
-    cfp_dispatch(id, cmd_token);
+    cfp_dispatch(id, cmd_token, arg_token, event_queue);
 }
 
 static void cfp_draw_callback(Canvas* canvas, void* context) {
@@ -76,7 +142,7 @@ static void cfp_draw_callback(Canvas* canvas, void* context) {
     canvas_set_font(canvas, FontSecondary);
     canvas_draw_str(canvas, 2, 28, "Server activ pe CLI (USB)");
     canvas_draw_str(canvas, 2, 40, "comanda: cfp <id> <cmd>");
-    canvas_draw_str(canvas, 2, 60, "Back = iesire");
+    canvas_draw_str(canvas, 2, 60, "Back sau 'cfp N exit' = iesire");
 }
 
 static void cfp_input_callback(InputEvent* event, void* context) {
@@ -100,7 +166,7 @@ int32_t cfp_app_main(void* p) {
     // ParallelSafe: comanda trebuie sa functioneze cat timp aplicatia noastra
     // (care o inregistreaza) ruleaza pe ecran, nu doar cand nu-i nicio aplicatie deschisa.
     cli_registry_add_command(
-        cli, CFP_CLI_COMMAND, CliCommandFlagParallelSafe, cfp_cli_callback, NULL);
+        cli, CFP_CLI_COMMAND, CliCommandFlagParallelSafe, cfp_cli_callback, event_queue);
 
     InputEvent event;
     bool running = true;

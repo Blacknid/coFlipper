@@ -43,6 +43,12 @@ Separarea celor două componente urmărește un principiu simplu: dispozitivul r
 
 Comunicarea dintre cele două componente se face prin portul serial USB al Flipper Zero, folosind un protocol text propriu, denumit CFP (coFlipper Protocol) și documentat integral în PROTOCOL.md.
 
+Legătura dintre modelul de limbaj și dispozitiv este realizată printr-un catalog declarativ de comenzi, commands.json. Acesta reprezintă singura sursă de adevăr a sistemului: fiecare comandă descrisă acolo este convertită automat, la pornirea agentului, într-o unealtă apelabilă de model (*function calling*). Adăugarea unei funcționalități noi presupune, prin urmare, descrierea ei în catalog și implementarea ei în firmware, fără modificări în logica agentului.
+
+Fluxul complet al unei cereri este următorul: utilizatorul formulează o intenție în limbaj natural; modelul decide care comenzi din catalog sunt necesare și le solicită; agentul le traduce în cadre CFP și le trimite pe portul serial; Flipper Zero le execută și răspunde; rezultatele reale sunt returnate modelului, care formulează pe baza lor răspunsul final.
+
+O constrângere de proiectare pe care am considerat-o esențială este aceea că modelul nu are permisiunea de a formula afirmații despre starea hardware-ului în absența unui rezultat efectiv primit de la dispozitiv. Dacă o comandă eșuează sau nu este încă implementată, agentul comunică explicit acest lucru, în loc să producă un răspuns plauzibil, dar fabricat. Fără această restricție, un asistent conversațional aplicat unui domeniu tehnic ar putea genera date aparent credibile — frecvențe, identificatori de carduri, protocoale — care nu corespund niciunei măsurători reale.
+
 ## Filosofia de proiectare
 
 Un aspect central al acestui proiect este delegarea deciziilor de „cum” către agent, păstrând la nivelul utilizatorului doar formularea intenției — „ce” anume își dorește. Această separare este inspirată din paradigma agenților capabili să opereze instrumente externe (*tool use*), în care limbajul natural devine interfața primară, iar traducerea în comenzi tehnice concrete este responsabilitatea stratului intermediar.

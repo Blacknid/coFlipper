@@ -1,6 +1,6 @@
 {
   "protocol": "CFP/1",
-  "description": "Catalog de comenzi coFlipper, pe doua nivele. 'device' = comenzi CFP trimise pe portul serial catre Flipper ('cfp <id> <name> [argumente]', vezi /PROTOCOL.md), executate direct de hardware. 'agent' = operatii de nivel inalt, executate pe desktop, care combina una sau mai multe comenzi device cu rationament LLM (Gemini) - aici e partea originala a proiectului, nu in comenzile device luate individual, care replica functii deja existente in firmware-ul Flipper Zero.",
+  "description": "Catalog de comenzi coFlipper, pe doua nivele. 'device' = comenzi CFP trimise pe portul serial catre Flipper ('cfp <id> <name> [argumente]', vezi /PROTOCOL.md), executate direct de hardware. 'agent' = operatii de nivel inalt, executate pe desktop, care combina una sau mai multe comenzi device cu rationament LLM (Gemini) - aici e partea originala a proiectului, nu in comenzile device luate individual, care replica functii deja existente in firmware-ul Flipper Zero. Comenzile cu 'agent_visible': false sunt de uz intern si nu se expun modelului ca unelte apelabile.",
   "updated": "2026-07-30",
   "commands": [
     {
@@ -42,13 +42,25 @@
       "status": "planned"
     },
     {
-      "name": "subghz.info",
+      "name": "exit",
+      "layer": "device",
+      "category": "core",
+      "description": "Inchide aplicatia CFP de pe Flipper, de la distanta. Necesara in dezvoltare: reinstalarea aplicatiei cere ca instanta anterioara sa fie inchisa, iar fara aceasta comanda ar fi nevoie de apasarea fizica a butonului Back la fiecare iteratie.",
+      "args": [],
+      "returns": "confirmare inchidere",
+      "status": "implemented",
+      "agent_visible": false
+    },
+    {
+      "name": "subghz.rssi",
       "layer": "device",
       "category": "subghz",
-      "description": "Informatii despre frecventa Sub-GHz curent configurata pe modulul radio.",
-      "args": [],
-      "returns": "frecventa curenta (Hz), modulatie",
-      "status": "stub"
+      "description": "Masoara nivelul de semnal (RSSI, in dBm) pe o frecventa data, ascultand aproximativ 100 ms. Valorile apropiate de -50 dBm indica un semnal puternic, cele sub -90 dBm indica in general doar zgomot de fond. Nu decodeaza semnalul, doar cuantifica prezenta lui.",
+      "args": [
+        { "name": "frequency", "type": "integer", "required": true, "description": "frecventa in Hz, ex: 433920000" }
+      ],
+      "returns": "frecventa efectiv sintetizata de radio (Hz) si valoarea RSSI maxima (dBm)",
+      "status": "implemented"
     },
     {
       "name": "subghz.scan",
@@ -85,15 +97,6 @@
       "status": "planned"
     },
     {
-      "name": "ir.info",
-      "layer": "device",
-      "category": "infrared",
-      "description": "Informatii despre ultimul semnal infrarosu receptionat.",
-      "args": [],
-      "returns": "protocol IR, adresa, comanda",
-      "status": "stub"
-    },
-    {
       "name": "ir.read",
       "layer": "device",
       "category": "infrared",
@@ -125,15 +128,6 @@
       ],
       "returns": "confirmare transmisie",
       "status": "planned"
-    },
-    {
-      "name": "nfc.info",
-      "layer": "device",
-      "category": "nfc",
-      "description": "Informatii despre ultimul tag NFC citit.",
-      "args": [],
-      "returns": "UID, tip card, protocol",
-      "status": "stub"
     },
     {
       "name": "nfc.read",
@@ -177,6 +171,18 @@
         { "name": "timeout_ms", "type": "integer", "required": false, "description": "cat asteapta un card, implicit 5000" }
       ],
       "returns": "ID card, protocol (EM4100, HID etc.)",
+      "status": "planned"
+    },
+    {
+      "name": "agent.check_frequency_activity",
+      "layer": "agent",
+      "category": "agent",
+      "description": "Interpreteaza in limbaj natural nivelul de semnal masurat pe una sau mai multe frecvente: traduce valorile brute in dBm intr-o concluzie utila ('pe 433.92 MHz se aude activitate clara, pe 868 MHz doar zgomot de fond'), coreleaza frecventa cu utilizarile ei tipice si, la cerere, compara mai multe frecvente pentru a indica unde merita ascultat. Se sprijina exclusiv pe masuratori reale obtinute prin subghz.rssi.",
+      "uses": ["subghz.rssi"],
+      "args": [
+        { "name": "frequency", "type": "integer", "required": false, "description": "frecventa de interes; daca lipseste, agentul alege frecventele ISM uzuale" }
+      ],
+      "returns": "interpretare in limbaj natural a nivelurilor de semnal masurate",
       "status": "planned"
     },
     {
