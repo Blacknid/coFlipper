@@ -37,7 +37,7 @@ Aceste trei direcții nu sunt exhaustive, ci reprezintă un punct de plecare pen
 Proiectul este organizat pe două componente principale, reflectate și în structura repository-ului:
 
 - flipper/ — logica destinată să ruleze pe (sau în relație directă cu) dispozitivul Flipper Zero: comunicarea cu modulele sale radio, IR și NFC, precum și expunerea acestor capabilități către restul sistemului.
-- desktop/ — componenta agentică propriu-zisă, responsabilă de interpretarea cererilor utilizatorului, decizia asupra pașilor necesari și orchestrarea comenzilor trimise către Flipper Zero.
+- desktop/ — componenta agentică propriu-zisă, responsabilă de interpretarea cererilor utilizatorului, decizia asupra pașilor necesari și orchestrarea comenzilor trimise către Flipper Zero. Include aplicația cu interfață grafică prin care utilizatorul interacționează efectiv cu sistemul.
 
 Separarea celor două componente urmărește un principiu simplu: dispozitivul rămâne executantul operațiunilor de nivel jos, în timp ce agentul concentrează întreaga logică de interpretare și decizie, fiind singurul punct cu care utilizatorul interacționează direct, în limbaj natural.
 
@@ -46,6 +46,8 @@ Comunicarea dintre cele două componente se face prin portul serial USB al Flipp
 Legătura dintre modelul de limbaj și dispozitiv este realizată printr-un catalog declarativ de comenzi, commands.json. Acesta reprezintă singura sursă de adevăr a sistemului: fiecare comandă descrisă acolo este convertită automat, la pornirea agentului, într-o unealtă apelabilă de model (*function calling*). Adăugarea unei funcționalități noi presupune, prin urmare, descrierea ei în catalog și implementarea ei în firmware, fără modificări în logica agentului.
 
 Fluxul complet al unei cereri este următorul: utilizatorul formulează o intenție în limbaj natural; modelul decide care comenzi din catalog sunt necesare și le solicită; agentul le traduce în cadre CFP și le trimite pe portul serial; Flipper Zero le execută și răspunde; rezultatele reale sunt returnate modelului, care formulează pe baza lor răspunsul final.
+
+Interacțiunea are loc într-o aplicație cu interfață grafică, organizată în două panouri: conversația și, permanent vizibilă alături de ea, lista comenzilor executate efectiv pe dispozitiv. Această a doua zonă are o funcție care depășește depanarea — permite utilizatorului să verifice că afirmațiile agentului se sprijină pe măsurători reale, nu pe formulări plauzibile.
 
 O constrângere de proiectare pe care am considerat-o esențială este aceea că modelul nu are permisiunea de a formula afirmații despre starea hardware-ului în absența unui rezultat efectiv primit de la dispozitiv. Dacă o comandă eșuează sau nu este încă implementată, agentul comunică explicit acest lucru, în loc să producă un răspuns plauzibil, dar fabricat. Fără această restricție, un asistent conversațional aplicat unui domeniu tehnic ar putea genera date aparent credibile — frecvențe, identificatori de carduri, protocoale — care nu corespund niciunei măsurători reale.
 

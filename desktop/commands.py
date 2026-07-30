@@ -102,15 +102,26 @@ class CommandDispatcher:
                 values.append(str(call_args[arg["name"]]))
         return values
 
+    @property
+    def simulated(self):
+        return getattr(self._client, "simulated", False)
+
     def dispatch(self, name, call_args):
         """Returneaza un dict, forma pe care Gemini o asteapta ca raspuns de unealta."""
         command = self._by_tool_name.get(name)
         if command is None:
-            return {"status": "error", "error": f"comanda necunoscuta: {name}"}
+            return self._result({"status": "error", "error": f"comanda necunoscuta: {name}"})
 
         args = self._positional_args(command, call_args or {})
         try:
             data = self._client.request(command["name"], *args)
         except Exception as exc:  # eroare de protocol sau de port serial
-            return {"status": "error", "error": str(exc)}
-        return {"status": "ok", "data": data}
+            return self._result({"status": "error", "error": str(exc)})
+        return self._result({"status": "ok", "data": data})
+
+    def _result(self, outcome):
+        # Cand datele vin de la simulator, marcajul insoteste fiecare rezultat: modelul
+        # trebuie sa poata distinge o masuratoare reala de una inventata de simulator.
+        if self.simulated:
+            outcome["simulated"] = True
+        return outcome

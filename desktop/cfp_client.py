@@ -18,6 +18,16 @@ def looks_like_flipper(port):
     return "flipper" in (port.description or "").lower()
 
 
+def find_flipper_ports():
+    """Porturile care par a fi un Flipper Zero, cele mai probabile primele.
+
+    Varianta neinteractiva a lui pick_port(), folosita de interfata grafica: aceasta
+    nu poate pune intrebari la stdin, deci are nevoie de lista bruta de candidati.
+    """
+    ports = list(serial.tools.list_ports.comports())
+    return [p.device for p in ports if looks_like_flipper(p)]
+
+
 def pick_port():
     ports = list(serial.tools.list_ports.comports())
     if not ports:
