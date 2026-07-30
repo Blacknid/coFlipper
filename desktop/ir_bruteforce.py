@@ -266,6 +266,14 @@ def bruteforce(client, text, brand=None, function=None, device_type=None,
     outcome["attempts_on_builtin"] = _failures.get(key, 0)
     if online_report:
         outcome["online_lookup"] = online_report
+        # The files actually fetched from the IR database, as full URLs, so the reasoning
+        # chain can show what the online search visited - the only online access the agent
+        # has, since it drives a device rather than browsing the web.
+        consulted = online_report.get("remotes_consulted")
+        if consulted:
+            import irdb
+
+            outcome["visited"] = [irdb.remote_url(path) for path in consulted]
     if source == "builtin" and not outcome.get("worked"):
         remaining = FAILURES_BEFORE_ONLINE - _failures.get(key, 0)
         if remaining > 0:

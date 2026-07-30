@@ -60,6 +60,12 @@ class ScriptedChat:
             )
         return self._responses.pop(0)
 
+    def send_message_stream(self, message):
+        """The streaming counterpart run_turn now uses: one prepared response, delivered as
+        a single chunk. A real stream would split it into many, but a stream of one whole
+        chunk exercises the same accumulation the multi-chunk case does."""
+        yield self.send_message(message)
+
 
 class Checks:
     """Minimal test bookkeeping, so the suite needs no external dependency."""

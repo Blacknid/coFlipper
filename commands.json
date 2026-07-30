@@ -962,6 +962,17 @@
       "status": "implemented"
     },
     {
+      "name": "agent.remember",
+      "layer": "agent",
+      "category": "agent",
+      "description": "Saves one durable fact to your persistent memory, so you still know it in future sessions after this conversation ends. Use it for things the user would expect you to remember across time: the devices they own and their brands ('the user's TV is a Samsung'), a stated preference, or a lasting, notable finding ('433.92 MHz is active at this location'). Do NOT store secrets, passwords, one-off values, or anything the user asked to keep private. Keep each fact to one short, self-contained sentence. The facts you already remember are listed in your system instruction, so check there before saving a duplicate.",
+      "args": [
+        { "name": "fact", "type": "string", "required": true, "description": "one short sentence to remember, e.g. 'the user's TV is a Samsung'" }
+      ],
+      "returns": "confirmation that the fact was stored, or that it was already remembered",
+      "status": "implemented"
+    },
+    {
       "name": "agent.confirm_authorized_action",
       "layer": "agent",
       "category": "agent",

@@ -97,6 +97,8 @@ One consequence of this separation deserves mention: the reasoning summaries are
 
 The reason the chain is displayed permanently, rather than hidden in a debugging log, is the same one behind the restriction against inventing data: an agent that phrases sentences in natural language sounds equally convincing whether it measured something or merely assumed it. The chain shows concretely what each statement rests on — and when a command fails, it is visible exactly what failed and at which moment. The final answer thus stops being a verdict and becomes the conclusion of a path the user can walk through and verify.
 
+The same principle covers the one place the agent reaches the network. It does not browse the web — it drives a device — but the online IR search (`agent.ir_control` with `search_online`) fetches remote files from the IR-code database (probonopd/irdb, over the jsDelivr CDN). When it does, the chain lists the exact files it visited, as links, under the command that fetched them: the codes are shown to have come from a named source rather than presented as if they had always been known. Reaching the database is the whole of the agent's web access; there are no other sites to show.
+
 ## Subagents
 
 Not every job fits comfortably inside the main conversation. Two cases came up often enough to be worth handling separately.
@@ -160,9 +162,31 @@ Subagents run one at a time, deliberately. Running them in parallel would buy li
 
 ## The graphical interface
 
-The window is split into two panels: on the left the conversation proper, on the right the reasoning chain described above. The top bar carries the project name and the active language model; the connection status (green for connected, red for error, yellow for simulated mode), the serial port in use and the available tools live in the device card below it.
+The window is organised as a row of tabs above a shared device card. Each tab is split into two panels: on the left the conversation proper, on the right the reasoning chain described above. The top bar carries the project name and the active language model, the controls for the parallel chats, and — in the device card below it — the connection status (green for connected, red for error, yellow for simulated mode), the serial port in use and the available tools.
 
-While the agent is working, the status bar follows the chain: it shows whether the model is reasoning at that moment or executing a particular command on the device, not merely the fact that it is busy.
+Each tab has its own status line under the panels: while a chat is working it shows whether the model is reasoning at that moment or executing a particular command, not merely the fact that it is busy. The shared device card, by contrast, shows the state of the one device — and, during an IR bruteforce, its progress — since that is common to every tab.
+
+The reply is streamed, not shown whole at the end: the answer types itself out as the model produces it, the commands appear in the chain the moment they run, and the status line previews the reasoning as it streams. The turn is built round by round from `send_message_stream`, so a long answer no longer looks like a frozen window followed by a wall of text — it arrives the way it is written.
+
+## Parallel chats and merge
+
+A chat is not the whole window; it is one tab. The `+ chat nou` button opens another, and each tab is a fully independent conversation with the model: its own history, its own reasoning chain, its own Gemini chat session. They run at the same time, each on its own worker thread, so several lines of work advance in parallel while the user reads or types in any one of them. The top bar shows how many are working at once.
+
+What they share is the device, because there is only one. Every tab reaches the Flipper through the same `CommandDispatcher`, whose device lock serialises access to the single serial port: two chats measuring at the same moment take turns on the wire rather than interleaving and desynchronising the protocol. Sharing the dispatcher also means they share one Marauder simulator and one session log — which is correct, since on real hardware they would be sharing one physical board and one device.
+
+The parallel chats are a *map*; the `⧉ merge` button is the *reduce*, and it is subject-aware. It hands each answered chat — its request, its final answer, and the commands it actually ran — to a separate synthesiser conversation (`merge.py`), which first groups the chats by subject (a frequency, a network, a device, a capability) and only then merges within each group. Chats on the SAME subject, even from different angles, are combined into one consolidated conclusion that names where they agreed and diverged; a chat alone on its subject is kept independent, with its own result, rather than forced together with unrelated ones. So two chats studying 433.92 MHz merge into a single conclusion, while a third scanning Wi-Fi stays on its own.
+
+The merged, subject-grouped result appears in its own read-only tab. The synthesiser obeys the same honesty rule as everything else: it may not invent a reading none of the chats took, and in simulated mode it says so. Merge is enabled only once at least two chats have answered and none is still working.
+
+## Memory and context management
+
+A conversation has two kinds of memory, and coFlipper handles them separately.
+
+The short-term memory is the conversation's own history: the model sees every earlier turn of the current chat. That history cannot grow without bound, though — each turn resends the whole of it, so the cost per turn climbs and the model's context limit eventually looms. Past a soft budget of turns (`COFLIPPER_CONTEXT_TURNS`, 16 by default), the chat is *compacted*: the older turns are replaced by a model-written summary that keeps the real readings and decisions, the most recent turns are kept verbatim, and the conversation continues on a much shorter context. The compaction is shown, not hidden — a line marks it in the tab — because a summary that silently drops something the user said would be exactly the kind of invisible loss the reasoning chain exists to prevent.
+
+The long-term memory is `memory.py`: a small set of durable facts the agent chose to keep, written to disk (`memory.json`) so they survive a restart and are loaded back into every new conversation. The model writes to it through the `agent_remember` tool — for things worth keeping across sessions, like the brand of a device the user owns, a preference, or a lasting finding — and reads from it automatically, since each session is built with the current memories folded into its system instruction. It is told not to store secrets or one-off values. The interface shows exactly what is remembered (the "🧠 memorie" button) and lets the user wipe it, because memory a user cannot inspect is memory they cannot trust. The memory is shared by every tab, since it belongs to the user, not to one conversation; a compaction re-reads it, so a fact remembered mid-session is folded into the rebuilt chat.
+
+Together with the stopping conditions already in place — a turn ends when the model asks for no further command, and every subagent runs under a hard round budget — these give the agentic loop its memory, its context management and its halting.
 
 ## Bringing up the connection
 
@@ -200,6 +224,8 @@ It can also be used as a module, which is how `agent.py` obtains its client:
 | agent.py | the agent proper: the conversation loop and orchestration of tool calls |
 | reasoning.py | the reasoning chain: the steps of a turn, in the order they happened |
 | subagents.py | the subagents: specialised assistants the main agent delegates to |
+| merge.py | the synthesiser that merges the results of several parallel chats into one |
+| memory.py | the agent's persistent memory: durable facts kept across sessions on disk |
 | commands.py | conversion of the commands.json catalog into Gemini tools, and dispatching of calls |
 | ir_bruteforce.py | the IR control/bruteforce orchestration behind the agent.ir_control tool |
 | ir_codes.py | the built-in table of infrared codes, by appliance type and brand |
@@ -225,7 +251,9 @@ Scenarios verified on the physical device:
 - comparing two frequencies, with the agent deciding on its own to perform two successive measurements and formulate a conclusion;
 - requesting a physically impossible frequency (2.4 GHz), in which case the agent reported the error returned by the device and correctly explained the hardware limitation, without inventing a measurement.
 
-The graphical interface was verified separately, with the simulated device: connecting, correct enabling of the controls, sending a request, displaying the executed commands and the final response, as well as handling errors without freezing the window.
+The graphical interface was verified separately, with the simulated device: connecting, correct enabling of the controls, sending a request, displaying the executed commands and the final response, as well as handling errors without freezing the window. The parallel chats were checked the same way: opening and closing tabs, each tab holding its own independent conversation, all of them sharing the one dispatcher, and the merge becoming available only once at least two chats have answered. The subject-aware merge itself was run against the real Gemini API with three chats — two studying the same frequency and one scanning Wi-Fi — and it correctly merged the first two into a single conclusion while keeping the third independent, each finding kept tied to the chat that produced it.
+
+Memory and context management were verified against the real Gemini API too. Persistent memory: the agent, told a durable fact in one chat, saved it through `agent_remember`, and a brand-new chat — a separate conversation — recalled it from the loaded memory. Context compaction: a chat driven past a lowered turn budget was compacted, its history shrinking to a summary plus the recent turns while it kept answering coherently, and the summary preserved the facts rather than dropping them.
 
 Two test suites cover the parts that can be checked without hardware and without the API. Both run in under a second and can be repeated freely, since the model is replaced by a scripted set of responses:
 

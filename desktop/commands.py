@@ -124,12 +124,15 @@ class CommandDispatcher:
     the analyst subagent researches.
     """
 
-    def __init__(self, commands, client, subagents=None, on_progress=None):
+    def __init__(self, commands, client, subagents=None, on_progress=None, memory=None):
         self._by_tool_name = {tool_name(cmd["name"]): cmd for cmd in commands}
         self._client = client
         # Set after construction in practice: the runner needs the dispatcher in order to
         # execute device commands, so one of the two has to be wired up second.
         self.subagents = subagents
+        # The persistent memory the agent.remember tool writes to. None disables it: the
+        # tool then reports that memory is unavailable instead of silently doing nothing.
+        self.memory = memory
         # Called as a long-running agent command advances (currently the IR bruteforce),
         # so the interface can show progress instead of appearing frozen.
         self._on_progress = on_progress
@@ -186,6 +189,11 @@ class CommandDispatcher:
         in Python rather than a single CFP frame. This is the non-subagent kind of
         agent command: it is a function here, not a separate model conversation.
         """
+        if command["name"] == "agent.remember":
+            if self.memory is None:
+                return {"status": "error", "error": "persistent memory is not available"}
+            return self.memory.remember((call_args or {}).get("fact", ""))
+
         if command["name"] == "agent.ir_control":
             from ir_bruteforce import bruteforce
 
