@@ -501,13 +501,13 @@ class CoFlipperWindow:
         elif step.kind == ANSWER:
             self._append(self.chain, f"răspuns formulat ({step.at_s:.1f} s)\n", "label")
 
-<<<<<<< HEAD
     def _on_spawn(self, step):
         """Announces the summoning of a subagent: who it is, what it can do, what was asked.
 
         Delegation must not pass unnoticed. If only the result appeared in the chain, the
         user would have no way of knowing that a part of the answer was produced by a
-        second model, with different tools and a different instruction.
+        second model, with different tools and a different instruction. The app builder's
+        three debating agents are announced through this same path.
         """
         meta = step.meta
         tools = ", ".join(meta.get("tools") or []) or "niciuna (fara acces la dispozitiv)"
@@ -536,14 +536,11 @@ class CoFlipperWindow:
         self._append(self.chain, _indent(step.text, step.depth + 1) + "\n\n", "thought")
         self._set_status("agentul principal preia raportul...", ORANGE)
 
-    # ----------------------------------------------------------- worker threads
-=======
     def _on_event_ir_progress(self, payload):
         sent, total = payload
         self._set_status(f"bruteforce IR: {sent}/{total} coduri trimise", WARN_YELLOW)
 
-    # ------------------------------------------------------------- fire de lucru
->>>>>>> 655a80a85f43f7e3f520c36f472286eba905fc2d
+    # ----------------------------------------------------------- worker threads
 
     def _on_ir_progress(self, sent, total):
         """Apelat din firul de lucru, in timpul unui bruteforce IR.
@@ -586,20 +583,15 @@ class CoFlipperWindow:
                 self.flipper = LiveDevice()
                 status = "se caută dispozitivul..."
 
-<<<<<<< HEAD
-            self.dispatcher = CommandDispatcher(commands, self.flipper)
+            # on_progress keeps the window alive while a long agent command runs (the IR
+            # bruteforce, the app build): without it the window would look frozen.
+            self.dispatcher = CommandDispatcher(
+                commands, self.flipper, on_progress=self._on_ir_progress
+            )
             self.dispatcher.subagents = SubagentRunner(
                 api_key, self.dispatcher, self.dispatcher.simulated
             )
             # The client is kept as an attribute, not a local variable: see build_chat.
-=======
-            # Bruteforce-ul IR dureaza secunde bune; fara acest apel fereastra ar parea
-            # blocata cat timp Flipper-ul emite codurile.
-            self.dispatcher = CommandDispatcher(
-                commands, self.flipper, on_progress=self._on_ir_progress
-            )
-            # Clientul se pastreaza ca atribut, nu ca variabila locala: vezi build_chat.
->>>>>>> 655a80a85f43f7e3f520c36f472286eba905fc2d
             self.genai_client, self.chat = build_chat(
                 api_key, commands, self.dispatcher.simulated
             )
@@ -618,7 +610,7 @@ class CoFlipperWindow:
                 "tool_count": len(device),
                 "categories": sorted({c.get("category", "other") for c in device}),
                 "subagents": sorted(
-                    {c["subagent"] for c in commands if c.get("layer") == "agent"}
+                    {c["subagent"] for c in commands if c.get("subagent")}
                 ),
                 "simulated": self.dispatcher.simulated,
             },

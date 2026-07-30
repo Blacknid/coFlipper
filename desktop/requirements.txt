@@ -1,3 +1,7 @@
 google-genai
 python-dotenv
 pyserial
+# ufbt is the Flipper build tool, invoked as a subprocess by the app builder to compile and
+# install generated apps. Only needed for the build_flipper_app / edit_flipper_app feature;
+# the rest of the agent runs without it. See /APP_BUILDER.md.
+ufbt

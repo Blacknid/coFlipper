@@ -57,11 +57,7 @@ The solution has three components that complement one another:
 
 Without the first measure, the restriction in the instruction would have remained a mere recommendation, one the model had no way to apply: nothing in the data it received indicated that it was inside a simulation.
 
-<<<<<<< HEAD
 ## The reasoning chain
-=======
-## Lanțul de raționament
->>>>>>> 655a80a85f43f7e3f520c36f472286eba905fc2d
 
 Between the user's request and the final answer lies a succession of decisions: which tool is worth calling, what the device responded, what conclusion can be drawn from that response, whether another measurement is needed. The application keeps this succession and displays it step by step, in the order in which it happened. A turn may contain several rounds of dialogue with the model, and every round contributes steps to the chain.
 
@@ -162,15 +158,15 @@ The second is the choice of model. The free-tier quota is counted separately per
 
 Subagents run one at a time, deliberately. Running them in parallel would buy little here — there is a single radio in the device, so measurements have to be serialised anyway — while multiplying the risk of hitting the per-minute rate limit. The device access they do share is guarded by a lock, since a single serial port serves the Flipper and two overlapping requests would desynchronise the protocol, matching responses to the wrong command.
 
-<<<<<<< HEAD
+## Building Flipper apps
+
+The agent can build actual native Flipper Zero applications on request ("build me a simple paint app"). This is not a single model writing some C and hoping: three separate agents debate it — a proposer that researches the task and writes the source, a challenger that argues against the design, and an arbiter that keeps only what survives the argument — after which the result is compiled with `ufbt` and, if a device is attached, installed. Compiler errors are fed back into the debate to be fixed, the generated source is saved and stays editable ("add a bigger brush to the paint app"), and the whole debate appears nested in the reasoning chain. It reports the real compiler result and never claims an app built or installed unless the toolchain confirmed it. This is implemented in `app_builder.py`, `app_store.py` and `ufbt_runner.py`, and documented in full in [/APP_BUILDER.md](../APP_BUILDER.md).
+
 ## The graphical interface
 
 The window is split into two panels: on the left the conversation proper, on the right the reasoning chain described above. The top bar carries the project name and the active language model; the connection status (green for connected, red for error, yellow for simulated mode), the serial port in use and the available tools live in the device card below it.
 
 While the agent is working, the status bar follows the chain: it shows whether the model is reasoning at that moment or executing a particular command on the device, not merely the fact that it is busy.
-=======
-Cât timp agentul lucrează, bara de stare urmărește lanțul: arată dacă modelul raționează în acel moment sau execută o anumită comandă pe dispozitiv, nu doar faptul că este ocupat.
->>>>>>> 655a80a85f43f7e3f520c36f472286eba905fc2d
 
 ## Bringing up the connection
 
@@ -204,11 +200,16 @@ It can also be used as a module, which is how `agent.py` obtains its client:
 
 | File | Role |
 |---|---|
-<<<<<<< HEAD
 | gui.py | the graphical application (Tkinter) |
 | agent.py | the agent proper: the conversation loop and orchestration of tool calls |
 | reasoning.py | the reasoning chain: the steps of a turn, in the order they happened |
 | subagents.py | the subagents: specialised assistants the main agent delegates to |
+| app_builder.py | the app builder: the three-way proposer/challenger/arbiter debate that writes, compiles and installs a Flipper app |
+| app_store.py | the persistent, editable store of generated apps (source, manifest, build history) |
+| ufbt_runner.py | the compile/install wrapper around ufbt, run as a subprocess so real compiler output can be captured |
+| ir_bruteforce.py | drives an IR bruteforce run from a natural-language request |
+| ir_codes.py | the built-in table of IR codes and the appliance/brand/function detection |
+| irdb.py | the online IR remote database (irdb) lookup, used as a fallback |
 | commands.py | conversion of the commands.json catalog into Gemini tools, and dispatching of calls |
 | device.py | the device connection used by the interface, on a background thread |
 | protocol.py | implementation of the CFP client over the serial port |
@@ -217,20 +218,9 @@ It can also be used as a module, which is how `agent.py` obtains its client:
 | scripted_model.py | a scripted stand-in for the model, so the tests need no API requests |
 | test_reasoning.py | checks the construction of the reasoning chain |
 | test_subagents.py | checks delegation, the session log and the round budget |
+| test_app_builder.py | checks the app-builder debate, the compile-error feedback loop, budgets, honesty and persistence |
 | test_gemini.py | a minimal check of the connection to the Gemini API |
 | list_models.py | lists the models available to the configured key |
-=======
-| gui.py | aplicația cu interfață grafică (Tkinter) |
-| agent.py | nucleul agentului: bucla de conversație și orchestrarea apelurilor de unelte |
-| reasoning.py | lanțul de raționament: pașii unui tur, în ordinea în care s-au produs |
-| commands.py | conversia catalogului commands.json în unelte Gemini și dispecerizarea apelurilor |
-| device.py | conexiunea cu dispozitivul folosită de interfață, pe un fir de execuție separat |
-| protocol.py | implementarea clientului CFP peste portul serial |
-| cfp_client.py | stabilirea conexiunii (detecția portului + lansarea aplicației) și consolă pentru trimiterea manuală de comenzi CFP, fără model de limbaj |
-| mock_flipper.py | Flipper simulat, cu aceeași interfață ca clientul real |
-| test_gemini.py | verificare minimală a conexiunii la API-ul Gemini |
-| list_models.py | listează modelele disponibile pentru cheia configurată |
->>>>>>> 655a80a85f43f7e3f520c36f472286eba905fc2d
 
 ## Verification status
 
@@ -243,17 +233,19 @@ Scenarios verified on the physical device:
 - comparing two frequencies, with the agent deciding on its own to perform two successive measurements and formulate a conclusion;
 - requesting a physically impossible frequency (2.4 GHz), in which case the agent reported the error returned by the device and correctly explained the hardware limitation, without inventing a measurement.
 
-<<<<<<< HEAD
 The graphical interface was verified separately, with the simulated device: connecting, correct enabling of the controls, sending a request, displaying the executed commands and the final response, as well as handling errors without freezing the window.
 
-Two test suites cover the parts that can be checked without hardware and without the API. Both run in under a second and can be repeated freely, since the model is replaced by a scripted set of responses:
+Three test suites cover the parts that can be checked without hardware and without the API. They run quickly and can be repeated freely, since the model is replaced by a scripted set of responses:
 
     python test_reasoning.py     # 22 checks
     python test_subagents.py     # 38 checks
+    python test_app_builder.py   # 27 checks — the three-agent app builder
 
 `test_reasoning.py` covers the order of the steps across several rounds, the fact that every step reaches the display immediately, the separation of reasoning summaries from the answer text, the marking of simulated results, a turn in which the command fails, the case of a model that produces no reasoning summaries, and the cleaning up of Markdown markup.
 
 `test_subagents.py` covers a full delegation: what is announced when a subagent is summoned, the nesting and attribution of its steps, the fact that the analyst receives the session log and no tools, the report and the raw evidence handed back, the refusal of a subagent's attempt to summon another subagent, and the round budget — both when the subagent complies with the order to report and when it ignores it. Two further checks guard the edges: a session with no subagent runner attached must still execute device commands normally, and twelve commands issued from twelve threads at once must reach the device one at a time. That last one is not hypothetical — in a real run the scanner asked for five readings within a single round, and the model is free to do so.
+
+`test_app_builder.py` covers the three-agent app builder with its conversations scripted and `ufbt` replaced by a fake build runner: a clean build (the debate is nested and attributed, the compiler is really invoked), persistence and editing (the source and manifest are written, and an edit reloads the existing source into the debate), the compile-error feedback loop (a real compiler error reaches the next round's prompt), the honesty guarantee (a build that never compiles is never reported as built), and the request budget (a debate scripted to run forever is stopped by the ceiling). The compile path itself — the part the fake runner cannot prove — was verified separately against the real `ufbt`, which compiled a generated minimal app to an actual `.fap`. See [/APP_BUILDER.md](../APP_BUILDER.md).
 
 The suites are worth more than the count of checks suggests: writing them found two real defects. The round budget originally kept re-issuing its request to a subagent that ignored it, which would have consumed the whole daily quota on a single stubborn subagent; and one test double initially let reasoning text leak into the response's `text` field, which sent us to read the SDK's own implementation and confirm that it skips reasoning parts — the behaviour our answer-rebuilding relies on.
 
@@ -262,12 +254,3 @@ That the real model does return reasoning summaries while also using tools was c
 Delegation was confirmed the same way, and for the same reason: a scripted model cannot show whether a real one *chooses* to delegate. Asked whether there was real activity on 433.92 MHz — with the request stating explicitly that a single instantaneous reading was not what was wanted — the main agent summoned the scanner of its own accord rather than calling `subghz.rssi` itself. The scanner checked the device with `info`, took five readings, reported back that all five sat at -93.9 dBm with no variation, and the main agent phrased the conclusion from that report while stating that the data came from a simulator. The whole turn took 22 seconds, which is itself the argument for delegating work of this kind rather than running it inside the conversation.
 
 The simulator reproduces `subghz.rssi` as well, with the same frequency bands the device's CC1101 transceiver accepts. Without that restriction, the agent would have been developed against a device more permissive than the real one, and a frequency rejected by the hardware would have gone unnoticed during development.
-=======
-Interfața grafică a fost verificată separat, cu dispozitivul simulat: conectare, activarea corectă a controalelor, trimiterea unei cereri, afișarea comenzilor executate și a răspunsului final, precum și tratarea erorilor fără blocarea ferestrei.
-
-Construirea lanțului de raționament a fost verificată cu modelul înlocuit printr-un set fix de răspunsuri, ceea ce permite verificarea repetată fără a consuma cota zilnică de cereri: ordinea pașilor pe mai multe runde, faptul că fiecare pas ajunge imediat la afișaj, separarea rezumatelor de raționament de textul răspunsului, marcarea rezultatelor simulate, un tur în care comanda eșuează și cazul unui model care nu produce rezumate de raționament.
-
-Faptul că modelul real întoarce efectiv rezumate de raționament atunci când folosește și unelte a fost confirmat separat, cu API-ul Gemini: la cererea de a compara nivelul de semnal de pe două frecvențe, agentul a raționat, a efectuat cele două măsurători și a formulat concluzia, iar lanțul a cuprins toți pașii în ordine. Această verificare nu poate fi înlocuită de cea cu răspunsuri fixe, fiindcă exact aici se afla incertitudinea: dacă modelul acceptă cererea de rezumate simultan cu apelarea uneltelor.
-
-Simulatorul reproduce și `subghz.rssi`, cu aceleași benzi de frecvență pe care le acceptă emițătorul-receptor CC1101 al dispozitivului. Fără această restricție, agentul ar fi fost dezvoltat împotriva unui dispozitiv mai permisiv decât cel real, iar o frecvență respinsă de hardware ar fi trecut neobservată în timpul dezvoltării.
->>>>>>> 655a80a85f43f7e3f520c36f472286eba905fc2d

@@ -85,15 +85,13 @@ The distinction between `stopped` and `idle` is the whole result of the operatio
 | unknown_command    | The command is not recognized by the device                        |
 | missing_frequency  | The command requires a frequency but received no argument          |
 | invalid_frequency  | The frequency is outside the ranges supported by the radio module  |
-<<<<<<< HEAD
+| not_implemented    | The command is recognized by the firmware but not implemented yet   |
 | wifi_board_not_connected | A `wifi.*`/`ble.*` command was sent but no Marauder board is attached/powered |
 | no_target_selected | An attack was requested before a target was chosen with `wifi.select_ap`/`wifi.select_station` |
 | invalid_channel    | A Wi-Fi channel outside the 1–14 range was requested                |
 | invalid_selection  | A target selector referenced an index that is not in the captured list |
-=======
 | missing_code       | ir.queue did not receive all three of protocol, address, command   |
 | unknown_protocol   | The IR protocol name is not one the firmware knows                 |
 | busy               | A bruteforce is already in progress                                |
 | queue_full         | The IR queue is full (32 codes)                                    |
 | empty_queue        | ir.bruteforce was called with no codes queued                      |
->>>>>>> 655a80a85f43f7e3f520c36f472286eba905fc2d

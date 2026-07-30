@@ -2,6 +2,7 @@
   "protocol": "CFP/1",
   "description": "coFlipper command catalog, on two layers. 'device' = CFP commands sent over the serial port to the Flipper ('cfp <id> <name> [arguments]', see /PROTOCOL.md), executed directly by the hardware. Some device commands (category 'wifi' and 'ble', marked 'requires': 'wifi_dev_board') are served not by the Flipper itself but by an ESP32 Wi-Fi dev board flashed with Marauder firmware and attached to the Flipper's GPIO/UART header; the Flipper's CFP application forwards them to the board. 'agent' = high-level operations, executed on the desktop, which combine one or more device commands with LLM (Gemini) reasoning - this is the original part of the project, not the device commands taken individually, which replicate functions already present in the Flipper Zero / Marauder firmware. Each device command also carries an 'impact' field ('passive' = only listens/reads, 'offensive' = transmits and disrupts other devices, needs the user's authorization) to help the agent reason about consequences. Commands with 'agent_visible': false are for internal use and are not exposed to the model as callable tools.",
   "updated": "2026-07-30",
+  "_note_subghz_listen": "The Sub-GHz 'listen' feature spans both layers: subghz.read is the device primitive (decode one packet), agent.listen loops it over a time window through the listener subagent to harvest the LIST of distinct devices on a frequency and save each as a descriptively named .sub in apps_assets, and agent.replay_subghz re-emits a saved capture by its descriptive name (offensive, gated on authorization).",
   "commands": [
     {
       "name": "ping",
@@ -92,39 +93,41 @@
       "name": "subghz.read",
       "layer": "device",
       "category": "subghz",
-      "description": "Listens on a specific frequency and tries to identify the protocol of the captured signal (e.g. a gate remote, a weather station).",
+      "impact": "passive",
+      "description": "Listens on ONE frequency and decodes the NEXT single Sub-GHz packet that arrives, identifying its protocol - the low-level primitive behind Sub-GHz capture. It tunes the CC1101 transceiver to the given frequency, waits up to timeout_ms for a transmission, and if one is decoded returns its protocol name (e.g. Princeton, CAME, KeeLoq, Nice_FloR_S), the key/code carried, and the bit-length, together with the frequency the radio actually synthesised and the signal's RSSI. It captures AT MOST ONE signal per call: if the air is busy it returns the first packet it decodes and stops, and if nothing arrives within the timeout it returns 'no_signal'. This is passive - it only receives, it transmits nothing. To harvest EVERYTHING transmitting on a shared frequency (several unrelated devices at once), do not call this once; call agent.listen, which loops over subghz.read across a time window and returns the whole list of distinct devices. Successive calls on the same frequency return successive packets, so a device that keeps repeating is not re-reported endlessly.",
       "args": [
         {
           "name": "frequency",
           "type": "integer",
           "required": true,
-          "description": "frequency in Hz, e.g. 433920000"
+          "description": "frequency in Hz, must fall in a CC1101 band (300-348, 387-464 or 779-928 MHz), e.g. 433920000"
         },
         {
           "name": "timeout_ms",
           "type": "integer",
           "required": false,
-          "description": "how long it waits for a signal, 5000 by default"
+          "description": "how long it waits for a packet before giving up, 5000 by default"
         }
       ],
-      "returns": "the detected protocol (if known), the raw captured data",
-      "status": "planned"
+      "returns": "either 'signal' followed by protocol, key, bit-length, the frequency actually synthesised (Hz) and RSSI (dBm); or 'no_signal' if nothing was decoded within the timeout",
+      "status": "implemented"
     },
     {
       "name": "subghz.replay",
       "layer": "device",
       "category": "subghz",
-      "description": "Retransmits a Sub-GHz signal previously saved on the SD card. Intended for testing one's own devices (e.g. one's own gate remote), not for someone else's signals.",
+      "impact": "offensive",
+      "description": "Retransmits a Sub-GHz signal from a saved .sub file: it reads the file's frequency and code and keys the CC1101 transceiver to re-emit that exact signal. THIS TRANSMITS on the radio and can actuate the real device the signal belongs to (open a gate, trigger a relay), so it is only for testing one's own devices, never someone else's. It takes a raw filesystem path; prefer the agent-layer agent.replay_subghz, which lets the user name a capture descriptively ('the doorbell one') and resolves it to the right file, instead of calling this with a path directly. Requires the user's explicit authorization first (see agent.confirm_authorized_action).",
       "args": [
         {
           "name": "file",
           "type": "string",
           "required": true,
-          "description": "path to the saved .sub file"
+          "description": "absolute path to the saved .sub file to transmit"
         }
       ],
-      "returns": "transmission confirmation",
-      "status": "planned"
+      "returns": "transmission confirmation, echoing back the file that was replayed",
+      "status": "implemented"
     },
     {
       "name": "ir.read",
@@ -304,7 +307,6 @@
       "returns": "card ID, protocol (EM4100, HID, etc.)",
       "status": "planned"
     },
-
     {
       "name": "wifi.board_info",
       "layer": "device",
@@ -324,7 +326,12 @@
       "impact": "passive",
       "description": "Locks the Wi-Fi radio to a specific 2.4 GHz channel (1-14). Scans and sniffs only see traffic on the current channel, so set the channel of a target access point (from wifi.list_ap) before sniffing its clients or capturing its handshake. Rejects channels outside 1-14 with 'invalid_channel'.",
       "args": [
-        { "name": "channel", "type": "integer", "required": true, "description": "2.4 GHz channel, 1 to 14" }
+        {
+          "name": "channel",
+          "type": "integer",
+          "required": true,
+          "description": "2.4 GHz channel, 1 to 14"
+        }
       ],
       "returns": "the channel the radio is now tuned to",
       "status": "implemented"
@@ -337,7 +344,12 @@
       "impact": "passive",
       "description": "Scans the surrounding 2.4 GHz Wi-Fi for access points (routers/hotspots) and stores what it finds in the board's access-point list. Passive: it only listens to the beacons networks already broadcast, it does not transmit. Run this before wifi.list_ap, and before selecting a target for any attack. A scan runs for a short window and then returns how many access points were captured.",
       "args": [
-        { "name": "duration_ms", "type": "integer", "required": false, "description": "how long to listen, 8000 by default" }
+        {
+          "name": "duration_ms",
+          "type": "integer",
+          "required": false,
+          "description": "how long to listen, 8000 by default"
+        }
       ],
       "returns": "how many access points were captured",
       "status": "implemented"
@@ -350,7 +362,12 @@
       "impact": "passive",
       "description": "Scans for client stations (phones, laptops, IoT devices) associated with the access points already captured, and stores them in the station list. Passive listening only. Run wifi.scan_ap first so there are access points to attribute the clients to. A station is what you target for a client-specific deauthentication.",
       "args": [
-        { "name": "duration_ms", "type": "integer", "required": false, "description": "how long to listen, 8000 by default" }
+        {
+          "name": "duration_ms",
+          "type": "integer",
+          "required": false,
+          "description": "how long to listen, 8000 by default"
+        }
       ],
       "returns": "how many client stations were captured",
       "status": "implemented"
@@ -385,7 +402,12 @@
       "impact": "passive",
       "description": "Marks one or more access points from the list as the current target for a subsequent attack (wifi.attack_deauth, wifi.attack_beacon_clone). The selector is an index ('2'), a range ('0-3'), a comma list ('0,4,5') or 'all'. Selecting a target does nothing on its own; it only decides what the next attack will act on. Prefer selecting the specific network the user named over 'all'.",
       "args": [
-        { "name": "targets", "type": "string", "required": true, "description": "index, range like 0-3, comma list like 0,4,5, or the word all" }
+        {
+          "name": "targets",
+          "type": "string",
+          "required": true,
+          "description": "index, range like 0-3, comma list like 0,4,5, or the word all"
+        }
       ],
       "returns": "how many access points are now selected",
       "status": "implemented"
@@ -398,7 +420,12 @@
       "impact": "passive",
       "description": "Marks one or more client stations from the list as the current target, for a client-specific deauthentication. Same selector syntax as wifi.select_ap.",
       "args": [
-        { "name": "targets", "type": "string", "required": true, "description": "index, range, comma list, or the word all" }
+        {
+          "name": "targets",
+          "type": "string",
+          "required": true,
+          "description": "index, range, comma list, or the word all"
+        }
       ],
       "returns": "how many stations are now selected",
       "status": "implemented"
@@ -521,7 +548,12 @@
       "impact": "offensive",
       "description": "Floods the air with beacon frames advertising randomly named fake networks, so a swarm of bogus SSIDs appears in every device's Wi-Fi list. Active transmission that clutters the spectrum; confirm the user is authorized to transmit in this environment before starting. Runs until stopped with wifi.stop.",
       "args": [
-        { "name": "count", "type": "integer", "required": false, "description": "how many fake SSIDs to broadcast, 20 by default" }
+        {
+          "name": "count",
+          "type": "integer",
+          "required": false,
+          "description": "how many fake SSIDs to broadcast, 20 by default"
+        }
       ],
       "returns": "confirmation that beacon spam has started",
       "status": "implemented"
@@ -578,7 +610,12 @@
       "impact": "offensive",
       "description": "Stands up a fake open access point with a captive-portal login page (an evil twin), so devices that connect are shown a page that can harvest whatever the page asks for. This is a phishing-capable attack and must only be used on the user's own network or in an explicitly authorized engagement, with clear confirmation. Runs until stopped with wifi.stop.",
       "args": [
-        { "name": "ssid", "type": "string", "required": false, "description": "the network name to advertise; if omitted, the selected AP's SSID is cloned" }
+        {
+          "name": "ssid",
+          "type": "string",
+          "required": false,
+          "description": "the network name to advertise; if omitted, the selected AP's SSID is cloned"
+        }
       ],
       "returns": "confirmation that the evil portal has started",
       "status": "implemented"
@@ -613,7 +650,12 @@
       "impact": "passive",
       "description": "Adds one SSID (network name) to the user-defined SSID list used by wifi.attack_beacon_list. Building the list does nothing on the air by itself. The name cannot contain spaces (CFP v1 limitation).",
       "args": [
-        { "name": "ssid", "type": "string", "required": true, "description": "the network name to add, without spaces" }
+        {
+          "name": "ssid",
+          "type": "string",
+          "required": true,
+          "description": "the network name to add, without spaces"
+        }
       ],
       "returns": "confirmation, and the new size of the list",
       "status": "implemented"
@@ -626,7 +668,12 @@
       "impact": "passive",
       "description": "Fills the user-defined SSID list with a number of randomly generated network names, as raw material for wifi.attack_beacon_list. Does nothing on the air by itself.",
       "args": [
-        { "name": "count", "type": "integer", "required": true, "description": "how many random SSIDs to generate" }
+        {
+          "name": "count",
+          "type": "integer",
+          "required": true,
+          "description": "how many random SSIDs to generate"
+        }
       ],
       "returns": "confirmation, and the new size of the list",
       "status": "implemented"
@@ -675,7 +722,6 @@
       "returns": "confirmation that the current operation stopped",
       "status": "implemented"
     },
-
     {
       "name": "ble.scan",
       "layer": "device",
@@ -684,7 +730,12 @@
       "impact": "passive",
       "description": "Scans for Bluetooth Low Energy devices advertising nearby and stores them in the BLE device list. Passive listening. Run before ble.list. The board's Marauder firmware handles BLE in addition to Wi-Fi.",
       "args": [
-        { "name": "duration_ms", "type": "integer", "required": false, "description": "how long to listen, 8000 by default" }
+        {
+          "name": "duration_ms",
+          "type": "integer",
+          "required": false,
+          "description": "how long to listen, 8000 by default"
+        }
       ],
       "returns": "how many BLE devices were captured",
       "status": "implemented"
@@ -821,20 +872,84 @@
       "returns": "confirmation that the board is rebooting",
       "status": "implemented"
     },
-
     {
       "name": "agent.check_frequency_activity",
       "layer": "agent",
       "category": "agent",
       "subagent": "scanner",
       "description": "Delegates to the scanner subagent the monitoring of a frequency over several successive readings, in order to establish whether anything is actually transmitting on it. Use this instead of subghz.rssi whenever the question is about activity rather than about one instantaneous value: a single reading cannot distinguish an empty frequency from a transmitter that happens to be silent at that instant. It takes longer, since it performs several measurements, and it returns an interpreted conclusion together with all the readings behind it.",
-      "uses": ["subghz.rssi"],
+      "uses": [
+        "subghz.rssi"
+      ],
       "task": "Establish whether there is real radio activity on the requested frequency. Take several readings of the signal level, spaced out, and judge by the whole set: the maximum reached, how much the values vary, and whether anything stands out above the background noise. If no frequency was given, use the common ISM frequencies (433.92 MHz and 868.35 MHz).",
       "args": [
-        { "name": "frequency", "type": "integer", "required": false, "description": "the frequency of interest, in Hz; if absent, the common ISM frequencies are used" },
-        { "name": "readings", "type": "integer", "required": false, "description": "how many successive readings to take, 4 by default" }
+        {
+          "name": "frequency",
+          "type": "integer",
+          "required": false,
+          "description": "the frequency of interest, in Hz; if absent, the common ISM frequencies are used"
+        },
+        {
+          "name": "readings",
+          "type": "integer",
+          "required": false,
+          "description": "how many successive readings to take, 4 by default"
+        }
       ],
       "returns": "an interpreted conclusion about the activity, plus the raw readings it rests on",
+      "status": "implemented"
+    },
+    {
+      "name": "agent.listen",
+      "layer": "agent",
+      "category": "agent",
+      "subagent": "listener",
+      "impact": "passive",
+      "description": "Delegates to the listener subagent the harvesting of a Sub-GHz frequency over a window of time: instead of capturing one packet, it listens repeatedly across the whole duration and returns the LIST of DISTINCT devices heard on that frequency, each identified and saved. This is the command for the situation where several unrelated things share one frequency - the classic 433.92 MHz case where an electric relay, a doorbell remote, a car fob and a weather sensor are all transmitting at once. A single subghz.read would catch only whichever fired first; agent.listen loops over subghz.read for the whole window, deduplicates the captures by protocol and key, guesses what each device is from its protocol and frequency, and writes each distinct signal to disk in the apps_assets folder as a .sub file with a DESCRIPTIVE name (band + protocol + the guess, e.g. '433MHz_Princeton_wireless_doorbell_remote_4e7b90.sub') so it can be found again by a later search and replayed with agent.replay_subghz. Use this - not subghz.read - whenever the user wants to know 'what is transmitting on this frequency' or to record a device's signal. The subagent is PASSIVE: it only receives and writes files, it transmits nothing, so it can never actuate a device on its own. It takes longer than a single read and costs several requests, since it performs many captures. If no frequency is given it defaults to 433.92 MHz, the busiest ISM band.",
+      "uses": [
+        "subghz.rssi",
+        "subghz.read"
+      ],
+      "skills": [
+        "save_subghz",
+        "list_subghz"
+      ],
+      "task": "Listen on the given frequency for the given number of seconds and harvest every DISTINCT Sub-GHz signal transmitting on it. Optionally confirm activity with one subghz.rssi reading first; then call subghz.read in a loop across the window, stopping early if two consecutive reads return no_signal. Deduplicate captures by protocol AND key, so a repeating device counts once. For each distinct signal, guess what the source device is from its protocol and frequency (a doorbell, a relay, a car fob, a sensor), stating it is a guess. Save each distinct signal with save_subghz, passing a specific plain-English guess so the saved file is descriptively named and findable. If no frequency was given, use 433.92 MHz. Report the harvested list: for each device, its protocol, key, RSSI, your guess, and the name it was saved under.",
+      "args": [
+        {
+          "name": "frequency",
+          "type": "integer",
+          "required": false,
+          "description": "the frequency to listen on, in Hz, e.g. 433920000; defaults to 433.92 MHz if omitted"
+        },
+        {
+          "name": "time",
+          "type": "integer",
+          "required": false,
+          "description": "how long to listen, in seconds; the subagent turns this into a number of successive reads. 20 by default"
+        }
+      ],
+      "returns": "the list of distinct Sub-GHz devices harvested from the frequency, each with its protocol, key, RSSI, a guess at the source, and the descriptive name it was saved under in apps_assets; plus the raw captures behind it",
+      "status": "implemented"
+    },
+    {
+      "name": "agent.replay_subghz",
+      "layer": "agent",
+      "category": "agent",
+      "impact": "offensive",
+      "description": "Retransmits a Sub-GHz signal previously harvested and saved by agent.listen, named the way the user refers to it ('replay the doorbell one', 'send the relay signal') rather than by file path. It looks the capture up in the apps_assets folder by a substring of its descriptive name, resolves it to the exact .sub file, and sends the device-layer subghz.replay to re-emit it. If the name matches no capture, or matches several, it says so and lists the candidates instead of guessing - replaying the wrong signal is exactly the mistake to avoid. THIS IS AN OFFENSIVE, TRANSMITTING action: it keys the radio and can actuate the real device the signal belongs to (open a gate, ring a doorbell, trip a relay). Send it ONLY after the user has explicitly confirmed they own the device or are authorized to test it (see agent.confirm_authorized_action). Use agent.listen first to capture and save the signal; use list_subghz-style listing (or just tell the user) to see what is available to replay.",
+      "uses": [
+        "subghz.replay"
+      ],
+      "args": [
+        {
+          "name": "name",
+          "type": "string",
+          "required": true,
+          "description": "the capture to replay, as a substring of its descriptive name, e.g. 'doorbell' or 'relay' or the full saved name"
+        }
+      ],
+      "returns": "confirmation of which saved capture was replayed and from which file, or an error listing the available captures if the name was ambiguous or unknown",
       "status": "implemented"
     },
     {
@@ -846,7 +961,12 @@
       "uses": [],
       "task": "Research the session log below and answer the question asked. Rely exclusively on what the log contains, and state explicitly what it does not contain but would be needed for a complete answer.",
       "args": [
-        { "name": "question", "type": "string", "required": true, "description": "what should be established from the session history" }
+        {
+          "name": "question",
+          "type": "string",
+          "required": true,
+          "description": "what should be established from the session history"
+        }
       ],
       "returns": "an answer drawn from the session log, with the gaps in it stated explicitly",
       "status": "implemented"
@@ -857,12 +977,55 @@
       "category": "agent",
       "subagent": "wifi_recon",
       "description": "Delegates to the wifi_recon subagent a full passive survey of the Wi-Fi (and optionally BLE) environment: it confirms the board, scans for access points and their clients, reads the lists, and reports back an interpreted picture - how many networks, which are open vs encrypted, which are busiest, and which stand out as plausible targets for the user's stated goal. Use this instead of calling the individual scan/list commands yourself whenever the user asks an open question about 'what is around' or 'find the network X', since it takes several successive scans and interprets the whole. The subagent is passive by design: it has NO attack tools and can only listen, so it can never start a deauth or spam on its own - any offensive action stays your decision, taken with the user, afterwards.",
-      "uses": ["wifi.board_info", "wifi.scan_ap", "wifi.scan_station", "wifi.list_ap", "wifi.list_station", "ble.scan", "ble.list"],
+      "uses": [
+        "wifi.board_info",
+        "wifi.scan_ap",
+        "wifi.scan_station",
+        "wifi.list_ap",
+        "wifi.list_station",
+        "ble.scan",
+        "ble.list"
+      ],
       "task": "Survey the Wi-Fi environment and report an interpreted picture of it. Confirm the Wi-Fi board is present, scan for access points and their client stations, read the lists, and summarise: how many networks, their encryption, which channels are busy, which clients are active, and - in light of what the main agent asked for - which access points or stations are the plausible targets. Do not attack anything; you have no tools to do so. If a specific network was named, say whether it was found and give its index, channel and encryption.",
       "args": [
-        { "name": "goal", "type": "string", "required": false, "description": "what the survey is for, e.g. 'find the network called Office_WiFi' or 'general overview'" }
+        {
+          "name": "goal",
+          "type": "string",
+          "required": false,
+          "description": "what the survey is for, e.g. 'find the network called Office_WiFi' or 'general overview'"
+        }
       ],
       "returns": "an interpreted survey of the environment, with the captured lists behind it",
+      "status": "implemented"
+    },
+    {
+      "name": "agent.audit_files",
+      "layer": "agent",
+      "category": "agent",
+      "subagent": "audit",
+      "skill": "search_app_store",
+      "description": "Delegates to the audit subagent the searching of the project's own files on disk - the Flipper apps that have been generated and saved with build_flipper_app: their editable C source, FAP manifest, build logs and build/edit history. Use this whenever answering the user means looking through those files, or locating one, rather than reading the device. Trigger words that should route here: search, find, look for, which app, what apps, do I have, is there an app, where is, location of, path to, the file for, the source of, the code for, the name of, list my apps, what have I built - and any question that names an app or script and asks you to locate, identify or inspect it rather than build or run it. Examples of the shape (not exhaustive): 'give me the name of the <something> app', 'find the app that failed to compile and why', 'where is the <something> app', 'what's the path to my <something> script', 'which of my apps uses the OK button?', 'do any of my apps draw to the screen?', 'what have I built so far?'. For a 'where is it located' question, answer with the app id and the file path the search returns. The audit subagent has file-search skills and NO device tools, so it can never touch the radio; it reports what it found in the files, with the app ids, file paths and lines each finding rests on. Do not guess what a generated app contains, is called, or where it lives - delegate here and answer from what the search actually returned. This searches the apps generated on this computer, not arbitrary files on the Flipper's SD card.",
+      "uses": [],
+      "skills": [
+        "list_app_store",
+        "search_app_store"
+      ],
+      "task": "Search the generated Flipper apps on disk and answer the question asked. If you do not already know which app is meant, list the apps first, then search. Report only what the file search returned - which app, which file, which line - and say plainly if nothing matched. Do not invent the contents of an app you did not search.",
+      "args": [
+        {
+          "name": "question",
+          "type": "string",
+          "required": true,
+          "description": "what should be found in the generated-app files, e.g. 'which app uses the OK button' or 'which build failed and why'"
+        },
+        {
+          "name": "appid",
+          "type": "string",
+          "required": false,
+          "description": "restrict the search to one app by its id, e.g. 'paint'; omit to search every generated app"
+        }
+      ],
+      "returns": "an answer drawn from the generated-app files, citing the app ids and files behind it",
       "status": "implemented"
     },
     {
@@ -962,11 +1125,77 @@
       "status": "implemented"
     },
     {
+      "name": "agent.build_flipper_app",
+      "layer": "agent",
+      "category": "appgen",
+      "description": "Builds an actual native Flipper Zero application (a .fap) from a request in natural language: 'build me a simple paint app', 'make a stopwatch', 'a dice roller'. This does not answer with talk: it runs a three-way design debate - a proposer that researches the task on the web and writes the C source against the Flipper SDK, a challenger that argues against that design with concrete objections, and an arbiter that keeps only what survives the argument - then compiles the result with the Flipper toolchain (ufbt) and, if a device is connected, installs it. Compiler errors are fed back into the debate to be fixed, up to a bounded number of attempts. The whole debate is shown in the reasoning chain. The generated source is saved and stays editable afterwards through edit_flipper_app. This is expensive - it takes a while and costs several model requests - so warn the user before starting. The result reports the REAL compiler outcome (exit code and captured output): if the build failed it says so and relays the error; it never claims an app was built, installed or is running unless the toolchain confirmed it. Without a physical Flipper the app is still compiled for real, but installation is reported as simulated.",
+      "uses": [],
+      "args": [
+        {
+          "name": "request",
+          "type": "string",
+          "required": true,
+          "description": "the app the user wants, in their own words, e.g. 'a simple paint app you draw on with the arrow keys'"
+        },
+        {
+          "name": "app_name",
+          "type": "string",
+          "required": false,
+          "description": "a short human name for the app, e.g. 'Paint'; if omitted a name is derived from the request. The app id (used on disk and on the device) is derived from this by lowercasing and replacing spaces with underscores."
+        }
+      ],
+      "returns": "the debate's conclusion, the real compiler result (built or the error), whether it was installed or that installation was simulated, and the app id under which the source was saved for later editing",
+      "status": "implemented"
+    },
+    {
+      "name": "agent.edit_flipper_app",
+      "layer": "agent",
+      "category": "appgen",
+      "description": "Changes an app that was already built with build_flipper_app: 'add a bigger brush to the paint app', 'make the stopwatch count down instead'. It locates the saved source of that app, runs the same three-way debate over the existing code with the change requested, recompiles and reinstalls. Use this rather than build_flipper_app whenever the user refers to an app that already exists - it preserves the existing app and its history instead of starting a new one. Reports the real compiler result exactly like build_flipper_app, and never claims the change worked unless the toolchain confirmed it.",
+      "uses": [],
+      "args": [
+        {
+          "name": "app_name",
+          "type": "string",
+          "required": true,
+          "description": "the name or id of the existing app to change, e.g. 'Paint' or 'paint'"
+        },
+        {
+          "name": "change_request",
+          "type": "string",
+          "required": true,
+          "description": "the change the user wants, in their own words, e.g. 'add a thicker brush toggled with the OK button'"
+        }
+      ],
+      "returns": "the debate's conclusion, the real compiler result of the changed app, whether it was reinstalled or that installation was simulated, and the app id",
+      "status": "implemented"
+    },
+    {
       "name": "agent.confirm_authorized_action",
       "layer": "agent",
       "category": "agent",
-      "description": "A mandatory safety gate before any device command that transmits/acts upon the real world (subghz.replay, nfc.emulate, ir.send, and every offensive Wi-Fi/BLE command: wifi.attack_*, wifi.evil_portal, wifi.karma, ble.spam_*): the agent explicitly asks the user to confirm that they own the target or are authorized to test it, before sending the command. It executes nothing by itself, it only validates the intent.",
-      "uses": ["subghz.replay", "nfc.emulate", "ir.send", "wifi.attack_deauth", "wifi.attack_deauth_all", "wifi.attack_beacon_random", "wifi.attack_beacon_list", "wifi.attack_beacon_clone", "wifi.attack_probe_flood", "wifi.attack_rickroll", "wifi.evil_portal", "wifi.karma", "ble.spam_apple", "ble.spam_android", "ble.spam_samsung", "ble.spam_windows", "ble.spam_all", "ble.spam_airtag"],
+      "description": "A mandatory safety gate before any device command that transmits/acts upon the real world (subghz.replay and its agent wrapper agent.replay_subghz, nfc.emulate, ir.send, and every offensive Wi-Fi/BLE command: wifi.attack_*, wifi.evil_portal, wifi.karma, ble.spam_*): the agent explicitly asks the user to confirm that they own the target or are authorized to test it, before sending the command. It executes nothing by itself, it only validates the intent.",
+      "uses": [
+        "subghz.replay",
+        "agent.replay_subghz",
+        "nfc.emulate",
+        "ir.send",
+        "wifi.attack_deauth",
+        "wifi.attack_deauth_all",
+        "wifi.attack_beacon_random",
+        "wifi.attack_beacon_list",
+        "wifi.attack_beacon_clone",
+        "wifi.attack_probe_flood",
+        "wifi.attack_rickroll",
+        "wifi.evil_portal",
+        "wifi.karma",
+        "ble.spam_apple",
+        "ble.spam_android",
+        "ble.spam_samsung",
+        "ble.spam_windows",
+        "ble.spam_all",
+        "ble.spam_airtag"
+      ],
       "args": [
         {
           "name": "action",
