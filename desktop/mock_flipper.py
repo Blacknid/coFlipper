@@ -16,6 +16,10 @@ STUBS = ("subghz.info", "ir.info", "nfc.info")
 
 
 class MockCFPClient:
+    # Marcaj citit de CommandDispatcher si transmis modelului la fiecare rezultat, ca
+    # sa nu poata prezenta date simulate drept masuratori reale.
+    simulated = True
+
     def __init__(self):
         self.calls = []
 

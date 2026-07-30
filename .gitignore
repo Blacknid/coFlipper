@@ -1,3 +1,6 @@
+# Cheia API nu are ce sa caute in depozit: repozitoriul e public.
+# Sablonul fara cheie se afla in desktop/.env.example.
+
 __pycache__/
 *.pyc
 .venv/

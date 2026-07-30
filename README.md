@@ -36,16 +36,18 @@ These three directions are not exhaustive; they are a starting point for validat
 
 The project is organized around two main components, mirrored in the repository structure:
 
-- flipper/ — the logic intended to run on (or in direct relation with) the Flipper Zero device: communication with its radio, IR, and NFC modules, as well as exposing these capabilities to the rest of the system.
-- desktop/ — the agentic component proper, responsible for interpreting user requests, deciding on the necessary steps, and orchestrating the commands sent to the Flipper Zero.
+- flipper/ — logica destinată să ruleze pe (sau în relație directă cu) dispozitivul Flipper Zero: comunicarea cu modulele sale radio, IR și NFC, precum și expunerea acestor capabilități către restul sistemului.
+- desktop/ — componenta agentică propriu-zisă, responsabilă de interpretarea cererilor utilizatorului, decizia asupra pașilor necesari și orchestrarea comenzilor trimise către Flipper Zero. Include aplicația cu interfață grafică prin care utilizatorul interacționează efectiv cu sistemul.
 
-Separating the two components follows a simple principle: the device remains the executor of low-level operations, while the agent concentrates all interpretation and decision logic, being the only point the user interacts with directly, in natural language.
+Separarea celor două componente urmărește un principiu simplu: dispozitivul rămâne executantul operațiunilor de nivel jos, în timp ce agentul concentrează întreaga logică de interpretare și decizie, fiind singurul punct cu care utilizatorul interacționează direct, în limbaj natural.
 
-Communication between the two components goes over the Flipper Zero's USB serial port, using a purpose-built text protocol named CFP (coFlipper Protocol), documented in full in PROTOCOL.md.
+Comunicarea dintre cele două componente se face prin portul serial USB al Flipper Zero, folosind un protocol text propriu, denumit CFP (coFlipper Protocol) și documentat integral în PROTOCOL.md.
 
 The link between the language model and the device is realized through a declarative command catalog, commands.json. This is the system's single source of truth: every command described there is automatically converted, when the agent starts, into a tool the model can call (*function calling*). Adding a new capability therefore means describing it in the catalog and implementing it in firmware, with no changes to the agent's logic.
 
-The full flow of a request is as follows: the user phrases an intent in natural language; the model decides which catalog commands are needed and requests them; the agent translates them into CFP frames and sends them over the serial port; the Flipper Zero executes them and responds; the real results are returned to the model, which uses them to formulate the final answer.
+Fluxul complet al unei cereri este următorul: utilizatorul formulează o intenție în limbaj natural; modelul decide care comenzi din catalog sunt necesare și le solicită; agentul le traduce în cadre CFP și le trimite pe portul serial; Flipper Zero le execută și răspunde; rezultatele reale sunt returnate modelului, care formulează pe baza lor răspunsul final.
+
+Interacțiunea are loc într-o aplicație cu interfață grafică, organizată în două panouri: conversația și, permanent vizibilă alături de ea, lista comenzilor executate efectiv pe dispozitiv. Această a doua zonă are o funcție care depășește depanarea — permite utilizatorului să verifice că afirmațiile agentului se sprijină pe măsurători reale, nu pe formulări plauzibile.
 
 One design constraint we considered essential is that the model is not permitted to make claims about the state of the hardware in the absence of an actual result received from the device. If a command fails or is not yet implemented, the agent states this explicitly instead of producing a plausible but fabricated answer. Without this restriction, a conversational assistant applied to a technical domain could generate seemingly credible data — frequencies, card identifiers, protocols — that corresponds to no real measurement.
 

@@ -67,9 +67,14 @@ def looks_like_flipper(port):
     return "flipper" in (port.description or "").lower()
 
 
-def list_ports():
-    """Returns [(device, description)] for all serial ports."""
-    return [(p.device, p.description) for p in serial.tools.list_ports.comports()]
+def find_flipper_ports():
+    """Porturile care par a fi un Flipper Zero, cele mai probabile primele.
+
+    Varianta neinteractiva a lui pick_port(), folosita de interfata grafica: aceasta
+    nu poate pune intrebari la stdin, deci are nevoie de lista bruta de candidati.
+    """
+    ports = list(serial.tools.list_ports.comports())
+    return [p.device for p in ports if looks_like_flipper(p)]
 
 
 def pick_port():

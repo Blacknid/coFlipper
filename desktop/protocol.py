@@ -40,6 +40,9 @@ def decode_frame(line):
 
 
 class CFPClient:
+    # Opusul lui MockCFPClient.simulated: datele vin de la hardware real.
+    simulated = False
+
     def __init__(self, port, baudrate=DEFAULT_BAUDRATE, timeout=DEFAULT_TIMEOUT):
         self._serial = serial.Serial(port, baudrate=baudrate, timeout=timeout)
         self._ids = itertools.count(1)

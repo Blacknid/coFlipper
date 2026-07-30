@@ -20,11 +20,10 @@ from google.genai import errors, types
 
 from commands import CommandDispatcher, build_tool, device_commands, load_catalog
 
-# The model is pinned deliberately, not via a "latest" alias: the alias always tracks the
-# most recent generation, and that generation comes with different usage limits. Concretely,
-# the gemini-flash-latest alias pointed to gemini-3.6-flash, limited to 20 requests per day
-# on the free plan - insufficient for development and demonstration.
-# It can be changed without modifying the code, through the COFLIPPER_MODEL env variable.
+# Model fixat intentionat, nu un alias de tip "latest": aliasul urmareste mereu cea mai
+# recenta generatie, iar aceasta vine cu alte limite de utilizare.
+# Pe planul gratuit fiecare model are aproximativ 20 de cereri pe zi, numarate separat,
+# deci schimbarea modelului prin variabila de mediu COFLIPPER_MODEL ofera o cota nouă.
 MODEL = os.environ.get("COFLIPPER_MODEL", "gemini-3.5-flash")
 
 # The API occasionally returns 503 when overloaded. Without a retry, such a transient
@@ -32,28 +31,64 @@ MODEL = os.environ.get("COFLIPPER_MODEL", "gemini-3.5-flash")
 SEND_RETRIES = 3
 RETRY_DELAY_S = 2.0
 
-SYSTEM_INSTRUCTION = """You are the assistant of the coFlipper project. You control a
-Flipper Zero device connected over USB, using the tools made available to you.
+SYSTEM_INSTRUCTION = """Ești asistentul proiectului coFlipper. Controlezi un dispozitiv
+Flipper Zero conectat prin USB, folosind uneltele care ți-au fost puse la dispoziție.
 
-Rules you follow strictly:
-1. Any information about the state of the device or about the signals around it comes
-   EXCLUSIVELY from the result of a tool call. You never invent frequencies,
-   UIDs, protocols, or hardware readings.
-2. If a tool responds with an error (for example 'not_implemented'), you tell the user
-   openly that the feature in question is not yet implemented on the device.
-   You do not compensate for the error with a plausible, invented answer.
-3. You may explain general technical concepts from your own knowledge, but you clearly
-   mark the difference between a general explanation and data measured by the device.
-4. Reply in the language in which you received the prompt.
+Reguli pe care le respecți strict:
+1. Orice informație despre starea dispozitivului sau despre semnalele din jur provine
+   EXCLUSIV din rezultatul unei unelte apelate. Nu inventezi niciodată frecvențe,
+   UID-uri, protocoale sau citiri hardware.
+2. Dacă o unealtă răspunde cu eroare, spui deschis utilizatorului ce a eșuat și nu
+   compensezi eroarea cu un răspuns plauzibil inventat. Erorile obișnuite sunt
+   'not_implemented' (funcția nu există încă în firmware), 'dispozitiv neconectat'
+   (Flipper Zero nu este legat prin USB — îi ceri utilizatorului să îl conecteze) și
+   'aplicatia coFlipper CFP nu ruleaza pe dispozitiv' (îi ceri să o pornească din
+   meniul Flipper-ului). Dispozitivul poate fi conectat sau deconectat oricând în
+   timpul conversației, deci o comandă poate eșua deși una anterioară a reușit.
+3. Poți explica noțiuni tehnice generale din cunoștințele tale, dar marchezi clar
+   diferența dintre explicație generală și date măsurate de dispozitiv.
+4. Raspunde in limba in care ai primit promptul.
+"""
+
+# Adaugat la instructiunea de sistem cand se lucreaza fara dispozitiv fizic. Fara el,
+# modelul primeste raspunsuri verosimile de la simulator si anunta utilizatorul ca
+# Flipper-ul e conectat si functioneaza - exact confuzia pe care proiectul o evita.
+SIMULATED_NOTICE = """
+ATENȚIE - MOD SIMULAT: niciun Flipper Zero fizic nu este conectat. Toate uneltele sunt
+servite de un simulator, iar rezultatele lor sunt fictive. Ele conțin câmpul
+'simulated': true. Nu afirmi niciodată că dispozitivul este conectat sau că o valoare a
+fost măsurată. În fiecare răspuns care se referă la starea dispozitivului sau la
+semnale, precizezi explicit că datele provin dintr-un simulator.
 """
 
 
 def build_client_for_device():
-    # connect() also launches the CFP application on the device if it is not already
-    # open - without it running, the Flipper does not know the `cfp` command at all.
-    from cfp_client import connect
+    from cfp_client import pick_port
+    from protocol import CFPClient
 
-    return connect()
+    return CFPClient(pick_port())
+
+
+def build_chat(api_key, commands, simulated=False):
+    """Sesiunea de conversatie, cu uneltele derivate din catalogul de comenzi.
+
+    Returneaza si clientul, nu doar conversatia: apelantul trebuie sa pastreze o
+    referinta la el, altfel colectorul de gunoaie il distruge si inchide conexiunea
+    HTTP pe care se sprijina conversatia.
+    """
+    instruction = SYSTEM_INSTRUCTION
+    if simulated:
+        instruction += SIMULATED_NOTICE
+
+    client = genai.Client(api_key=api_key)
+    chat = client.chats.create(
+        model=MODEL,
+        config=types.GenerateContentConfig(
+            system_instruction=instruction,
+            tools=[build_tool(commands)],
+        ),
+    )
+    return client, chat
 
 
 def send_with_retry(chat, message):
@@ -82,16 +117,21 @@ def send_with_retry(chat, message):
             time.sleep(RETRY_DELAY_S * attempt * 5)
 
 
-def run_turn(chat, dispatcher, message):
-    """One conversation turn: may include several rounds of tool calls."""
+def run_turn(chat, dispatcher, message, on_tool_call=None):
+    """Un tur de conversatie: poate include mai multe runde de apeluri de unelte.
+
+    on_tool_call(nume, argumente, rezultat) e apelat pentru fiecare comanda executata
+    pe dispozitiv, ca sa poata fi afisata de interfata (consola sau fereastra grafica).
+    """
     response = send_with_retry(chat, message)
 
     while response.function_calls:
         results = []
         for call in response.function_calls:
-            print(f"  [flipper] {call.name} {dict(call.args or {})}")
+            args = dict(call.args or {})
             outcome = dispatcher.dispatch(call.name, call.args)
-            print(f"  [flipper] -> {outcome}")
+            if on_tool_call:
+                on_tool_call(call.name, args, outcome)
             results.append(
                 types.Part.from_function_response(name=call.name, response=outcome)
             )
@@ -128,25 +168,24 @@ def main():
         flipper = build_client_for_device()
 
     dispatcher = CommandDispatcher(commands, flipper)
-    genai_client = genai.Client(api_key=api_key)
-    chat = genai_client.chats.create(
-        model=MODEL,
-        config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_INSTRUCTION,
-            tools=[build_tool(commands)],
-        ),
-    )
+    # genai_client nu e folosit direct, dar referinta trebuie pastrata cat dureaza
+    # conversatia (vezi build_chat).
+    genai_client, chat = build_chat(api_key, commands, dispatcher.simulated)  # noqa: F841
 
     names = ", ".join(cmd["name"] for cmd in commands)
-    print(f"Tools available to the model: {names}")
-    print("Write a request in natural language. Ctrl+C to finish.\n")
+    print(f"Unelte disponibile modelului: {names}")
+    print("Scrie o cerere in limbaj natural. Ctrl+C pentru a incheia.\n")
+
+    def log_tool_call(name, args, outcome):
+        print(f"  [flipper] {name} {args}")
+        print(f"  [flipper] -> {outcome}")
 
     try:
         while True:
             message = input("> ").strip()
             if not message:
                 continue
-            print(run_turn(chat, dispatcher, message))
+            print(run_turn(chat, dispatcher, message, log_tool_call))
     except KeyboardInterrupt:
         print("\nSession stopped.")
     finally:
