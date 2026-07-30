@@ -2,6 +2,8 @@
 #include <furi_hal_subghz.h>
 #include <furi_hal_infrared.h>
 #include <furi_hal_version.h>
+#include <furi_hal_serial.h>
+#include <furi_hal_serial_control.h>
 #include <cli/cli.h>
 #include <gui/gui.h>
 #include <gui/view_port.h>
@@ -29,6 +31,34 @@
 /* Pause between two transmitted codes. An appliance needs a moment to act on a command
    it accepted, and back-to-back frames are easy for a receiver to miss. */
 #define CFP_IR_GAP_MS 250
+
+/* --- Wi-Fi dev board (ESP32 Marauder) bridge ----------------------------------
+   The wifi.* / ble.* families are not served by the Flipper itself but by an ESP32
+   dev board on the GPIO/UART header. This firmware is a transparent forwarder: it
+   sends the frame out the USART and relays back the one line the board answers with,
+   so from the desktop's point of view a wifi.* command is an ordinary CFP command.
+   The companion board runs a CFP-speaking bridge (documented in /PROTOCOL.md): it
+   receives '<id> <cmd> <args>\n' and answers 'CFP/1 <id> OK|ERR ...\n'. */
+
+/* The WiFi dev board / Marauder speaks at 115200 on the USART (GPIO pins 13/14). */
+#define CFP_BOARD_BAUD 115200
+/* Longest we wait for the board to answer a whole line before deciding it is not there.
+   A scan takes far longer, but the board's CFP shim answers the moment the scan STARTS
+   (like ir.bruteforce), so a full second is generous for the acknowledgement itself. */
+#define CFP_BOARD_TIMEOUT_MS 1000
+/* How long each read blocks while waiting for the next byte, inside that deadline. */
+#define CFP_BOARD_POLL_MS 20
+/* A board response line cannot be longer than this; the list commands answer over
+   several frames rather than one long line, so this need not hold a whole scan. */
+#define CFP_BOARD_LINE_MAX 192
+#define CFP_BOARD_RX_BUFFER 256
+
+/* The link to the Wi-Fi dev board: the acquired USART handle and a stream buffer the
+   receive interrupt drains into, so the forwarder can read the reply a byte at a time. */
+typedef struct {
+    FuriHalSerialHandle* serial;
+    FuriStreamBuffer* rx;
+} CfpBoardBridge;
 
 /* One IR power code, as queued by the desktop before a bruteforce run. */
 typedef struct {
@@ -227,13 +257,112 @@ static void cfp_cmd_exit(uint32_t id, FuriMessageQueue* event_queue) {
     furi_message_queue_put(event_queue, &event, 0);
 }
 
+/* Called from the UART receive interrupt: drains each byte the board sends into the
+   stream buffer, where the forwarder picks it up. Kept to the single byte the event
+   reports, so nothing is done in interrupt context beyond the copy. */
+static void
+    cfp_board_rx_callback(FuriHalSerialHandle* handle, FuriHalSerialRxEvent event, void* context) {
+    CfpBoardBridge* bridge = context;
+    if(event & FuriHalSerialRxEventData) {
+        uint8_t data = furi_hal_serial_async_rx(handle);
+        furi_stream_buffer_send(bridge->rx, &data, 1, 0);
+    }
+}
+
+/* Acquires the USART and starts listening. If the port cannot be acquired the bridge is
+   left with a NULL handle, and every board command then answers
+   wifi_board_not_connected rather than crashing. */
+static void cfp_board_bridge_init(CfpBoardBridge* bridge) {
+    bridge->rx = furi_stream_buffer_alloc(CFP_BOARD_RX_BUFFER, 1);
+    bridge->serial = furi_hal_serial_control_acquire(FuriHalSerialIdUsart);
+    if(bridge->serial) {
+        furi_hal_serial_init(bridge->serial, CFP_BOARD_BAUD);
+        furi_hal_serial_async_rx_start(bridge->serial, cfp_board_rx_callback, bridge, false);
+    }
+}
+
+static void cfp_board_bridge_deinit(CfpBoardBridge* bridge) {
+    if(bridge->serial) {
+        furi_hal_serial_async_rx_stop(bridge->serial);
+        furi_hal_serial_deinit(bridge->serial);
+        furi_hal_serial_control_release(bridge->serial);
+        bridge->serial = NULL;
+    }
+    if(bridge->rx) {
+        furi_stream_buffer_free(bridge->rx);
+        bridge->rx = NULL;
+    }
+}
+
+/* Whether a command is served by the Wi-Fi dev board rather than by the Flipper. These
+   are forwarded over the USART; everything else is handled locally by cfp_dispatch. */
+static bool cfp_is_board_command(const char* cmd) {
+    return strncmp(cmd, "wifi.", 5) == 0 || strncmp(cmd, "ble.", 4) == 0 ||
+           strcmp(cmd, "marauder.reboot") == 0;
+}
+
+/* Forwards one frame to the board and relays its answer to the desktop unchanged.
+   'frame' is the request as the desktop sent it, minus the 'cfp' CLI word: the
+   '<id> <cmd> <args>' the board's CFP shim expects. A reply that never arrives means no
+   board is attached or powered, reported as wifi_board_not_connected so the desktop and
+   the model see a definite cause rather than a silent timeout. */
+static void cfp_forward_to_board(uint32_t id, const char* frame, CfpBoardBridge* bridge) {
+    if(!bridge || !bridge->serial) {
+        printf(CFP_VERSION " %lu ERR wifi_board_not_connected\r\n", id);
+        return;
+    }
+
+    /* Discard anything left in the buffer from an earlier exchange, so a slow reply to a
+       previous command cannot be mistaken for the answer to this one. */
+    uint8_t stale;
+    while(furi_stream_buffer_receive(bridge->rx, &stale, 1, 0) == 1) {
+    }
+
+    furi_hal_serial_tx(bridge->serial, (const uint8_t*)frame, strlen(frame));
+    furi_hal_serial_tx(bridge->serial, (const uint8_t*)"\n", 1);
+
+    char line[CFP_BOARD_LINE_MAX];
+    size_t len = 0;
+    bool complete = false;
+    uint32_t deadline = furi_get_tick() + furi_ms_to_ticks(CFP_BOARD_TIMEOUT_MS);
+
+    while(furi_get_tick() < deadline && len < sizeof(line) - 1) {
+        uint8_t byte;
+        if(furi_stream_buffer_receive(bridge->rx, &byte, 1, furi_ms_to_ticks(CFP_BOARD_POLL_MS)) ==
+           1) {
+            if(byte == '\r' || byte == '\n') {
+                /* End of line - but only once we have something, so a leading newline
+                   left on the wire does not end an empty read prematurely. */
+                if(len > 0) {
+                    complete = true;
+                    break;
+                }
+                continue;
+            }
+            line[len++] = (char)byte;
+        }
+    }
+    line[len] = '\0';
+
+    if(!complete && len == 0) {
+        printf(CFP_VERSION " %lu ERR wifi_board_not_connected\r\n", id);
+        return;
+    }
+
+    /* The board already answers in CFP, so its line is relayed verbatim; the Flipper does
+       not parse or reformat it. */
+    printf("%s\r\n", line);
+}
+
 static void cfp_dispatch(
     uint32_t id,
     const char* cmd,
     const char* arg,
     char** cursor,
+    const char* frame,
     FuriMessageQueue* event_queue,
-    CfpIrState* ir) {
+    CfpIrState* ir,
+    CfpBoardBridge* bridge) {
     if(strcmp(cmd, "ping") == 0) {
         printf(CFP_VERSION " %lu OK pong\r\n", id);
     } else if(strcmp(cmd, "info") == 0) {
@@ -250,6 +379,8 @@ static void cfp_dispatch(
         cfp_cmd_ir_reset(id, ir);
     } else if(strcmp(cmd, "exit") == 0) {
         cfp_cmd_exit(id, event_queue);
+    } else if(cfp_is_board_command(cmd)) {
+        cfp_forward_to_board(id, frame, bridge);
     } else {
         printf(CFP_VERSION " %lu ERR unknown_command\r\n", id);
     }
@@ -282,6 +413,7 @@ static char* cfp_next_token(char** cursor) {
 typedef struct {
     FuriMessageQueue* event_queue;
     CfpIrState* ir;
+    CfpBoardBridge* bridge;
 } CfpContext;
 
 static void cfp_cli_callback(PipeSide* pipe, FuriString* args, void* context) {
@@ -291,6 +423,13 @@ static void cfp_cli_callback(PipeSide* pipe, FuriString* args, void* context) {
     char buffer[160];
     strncpy(buffer, furi_string_get_cstr(args), sizeof(buffer) - 1);
     buffer[sizeof(buffer) - 1] = '\0';
+
+    /* A second, untouched copy: the tokeniser below overwrites spaces with '\0' in
+       buffer, but a command bound for the Wi-Fi board has to be forwarded whole. This
+       is the frame minus the 'cfp' word, i.e. exactly '<id> <cmd> <args>'. */
+    char frame[160];
+    strncpy(frame, furi_string_get_cstr(args), sizeof(frame) - 1);
+    frame[sizeof(frame) - 1] = '\0';
 
     /* strtok_r is not available in the firmware API, so we split the tokens
        manually; buffer is a local copy, so we are free to modify it. */
@@ -307,7 +446,8 @@ static void cfp_cli_callback(PipeSide* pipe, FuriString* args, void* context) {
     uint32_t id = (uint32_t)strtoul(id_token, NULL, 10);
     /* arg_token is the first argument; cursor still points at the rest, which the
        multi-argument commands (ir.queue) consume themselves. */
-    cfp_dispatch(id, cmd_token, arg_token, &cursor, ctx->event_queue, ctx->ir);
+    cfp_dispatch(
+        id, cmd_token, arg_token, &cursor, frame, ctx->event_queue, ctx->ir, ctx->bridge);
 }
 
 static void cfp_draw_callback(Canvas* canvas, void* context) {
@@ -415,6 +555,12 @@ int32_t cfp_app_main(void* p) {
         .label = "device",
     };
 
+    /* The link to the optional Wi-Fi dev board. Acquired here for the whole session:
+       if no board is attached the reads simply time out, and every Wi-Fi/BLE command
+       answers wifi_board_not_connected. */
+    CfpBoardBridge bridge = {.serial = NULL, .rx = NULL};
+    cfp_board_bridge_init(&bridge);
+
     ViewPort* view_port = view_port_alloc();
     view_port_draw_callback_set(view_port, cfp_draw_callback, &ir);
     view_port_input_callback_set(view_port, cfp_input_callback, event_queue);
@@ -422,7 +568,7 @@ int32_t cfp_app_main(void* p) {
     Gui* gui = furi_record_open(RECORD_GUI);
     gui_add_view_port(gui, view_port, GuiLayerFullscreen);
 
-    CfpContext ctx = {.event_queue = event_queue, .ir = &ir};
+    CfpContext ctx = {.event_queue = event_queue, .ir = &ir, .bridge = &bridge};
 
     CliRegistry* cli = furi_record_open(RECORD_CLI);
     // ParallelSafe: the command must work while our application (the one registering it)
@@ -464,6 +610,8 @@ int32_t cfp_app_main(void* p) {
 
     cli_registry_delete_command(cli, CFP_CLI_COMMAND);
     furi_record_close(RECORD_CLI);
+
+    cfp_board_bridge_deinit(&bridge);
 
     gui_remove_view_port(gui, view_port);
     furi_record_close(RECORD_GUI);

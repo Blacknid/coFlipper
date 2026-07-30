@@ -10,6 +10,7 @@ Running:
 """
 
 import argparse
+import itertools
 import os
 import sys
 import time
@@ -166,6 +167,12 @@ Rules you follow strictly:
    confirm in one sentence that they own the device or are authorized to test it, and you send
    it only after they confirm. If the name is ambiguous or unknown the tool lists the available
    captures rather than guessing; you relay that list and ask which one they mean.
+15. You have a persistent memory across sessions. When the user tells you something durable
+    and worth keeping - a device they own and its brand, a preference, a lasting finding -
+    you save it with the agent_remember tool, in one short sentence, so you still know it
+    the next time they open the application. You do not store secrets, passwords or one-off
+    values, and you do not announce that you are saving something unless asked. Whatever you
+    already remember is listed below under PERSISTENT MEMORY, when there is anything.
 """
 
 # Appended to the system instruction when working without a physical device. Without it,
@@ -187,29 +194,119 @@ def build_client_for_device():
     return CFPClient(pick_port())
 
 
-def build_chat(api_key, commands, simulated=False):
+def _system_instruction(simulated=False, memory_prompt=""):
+    """The full system instruction: the rules, then the persistent memory, then, in
+    simulated mode, the warning. Memory comes before the simulated notice so the warning
+    stays the last thing the model reads."""
+    instruction = SYSTEM_INSTRUCTION
+    if memory_prompt:
+        instruction += memory_prompt
+    if simulated:
+        instruction += SIMULATED_NOTICE
+    return instruction
+
+
+def _chat_config(commands, simulated=False, memory_prompt=""):
+    """The GenerateContentConfig shared by a fresh chat and by a compacted one, so a
+    conversation keeps exactly the same tools and instruction after it is compacted."""
+    return types.GenerateContentConfig(
+        system_instruction=_system_instruction(simulated, memory_prompt),
+        tools=[build_tool(commands)],
+        thinking_config=(
+            types.ThinkingConfig(include_thoughts=True) if INCLUDE_THOUGHTS else None
+        ),
+    )
+
+
+def build_chat(api_key, commands, simulated=False, memory_prompt=""):
     """The conversation session, with the tools derived from the command catalog.
 
     Returns the client as well, not only the chat: the caller has to keep a reference to
     it, otherwise the garbage collector destroys it and closes the HTTP connection the
     conversation relies on.
-    """
-    instruction = SYSTEM_INSTRUCTION
-    if simulated:
-        instruction += SIMULATED_NOTICE
 
+    memory_prompt is the persistent memory (memory.py) folded into the system instruction,
+    so every new conversation starts knowing the facts the agent chose to remember.
+    """
     client = genai.Client(api_key=api_key)
+    chat = client.chats.create(model=MODEL, config=_chat_config(commands, simulated, memory_prompt))
+    return client, chat
+
+
+# --- Context management ---------------------------------------------------------
+# A conversation's history is its short-term memory, but it cannot grow without bound: every
+# turn resends the whole of it, so the cost per turn rises and the model's context limit
+# looms. Past a soft budget of turns, the older part is replaced by a summary and only the
+# recent turns are kept verbatim - the conversation continues seamlessly on a short context.
+CONTEXT_TURN_LIMIT = int(os.environ.get("COFLIPPER_CONTEXT_TURNS", "16"))
+CONTEXT_KEEP_RECENT = 6
+
+SUMMARY_INSTRUCTION = """You compress a coFlipper conversation so it can continue without
+carrying its whole history. Write a short, factual summary in the conversation's own
+language: what the user asked, what was actually measured or done on the device (with the
+concrete values and the command results), what failed, and any decision or preference that
+should carry forward. Keep every real reading; drop the small talk. Plain text, no Markdown."""
+
+
+def _history_text(contents):
+    """The chat history flattened to plain text, for the summariser to compress."""
+    lines = []
+    for content in contents:
+        role = getattr(content, "role", "?")
+        for part in getattr(content, "parts", None) or []:
+            if getattr(part, "text", None):
+                lines.append(f"{role}: {part.text}")
+            elif getattr(part, "function_call", None):
+                lines.append(f"{role}: called {part.function_call.name}")
+            elif getattr(part, "function_response", None):
+                fr = part.function_response
+                lines.append(f"{role}: result of {fr.name} -> {fr.response}")
+    return "\n".join(lines)
+
+
+def _summarize_history(client, contents):
     chat = client.chats.create(
         model=MODEL,
-        config=types.GenerateContentConfig(
-            system_instruction=instruction,
-            tools=[build_tool(commands)],
-            thinking_config=(
-                types.ThinkingConfig(include_thoughts=True) if INCLUDE_THOUGHTS else None
-            ),
-        ),
+        config=types.GenerateContentConfig(system_instruction=SUMMARY_INSTRUCTION),
     )
-    return client, chat
+    response = send_with_retry(chat, "Summarise the conversation so far:\n\n" + _history_text(contents))
+    return answer_text(response)
+
+
+def maybe_compact(client, chat, commands, simulated=False, memory_prompt="", on_summary=None):
+    """Compacts an over-long chat. Returns (chat, compacted): the same chat when it is still
+    within budget, or a fresh one seeded with a summary plus the recent turns when it is not.
+
+    on_summary(summary, dropped_count) is called when a compaction happens, so the interface
+    can show that the context was compressed instead of it happening invisibly.
+    """
+    history = chat.get_history()
+    if len(history) <= CONTEXT_TURN_LIMIT:
+        return chat, False
+
+    keep = list(history[-CONTEXT_KEEP_RECENT:])
+    older = history[:-CONTEXT_KEEP_RECENT]
+    if not older:
+        # Nothing old enough to summarise (only possible if the budget is set below the
+        # number of turns kept); compacting would grow the history, not shrink it.
+        return chat, False
+    summary = _summarize_history(client, older)
+
+    seeded = [
+        types.Content(
+            role="user",
+            parts=[types.Part.from_text(text="[Summary of the earlier conversation]\n" + summary)],
+        ),
+        types.Content(
+            role="model", parts=[types.Part.from_text(text="Understood, continuing from here.")]
+        ),
+    ] + keep
+    new_chat = client.chats.create(
+        model=MODEL, config=_chat_config(commands, simulated, memory_prompt), history=seeded
+    )
+    if on_summary:
+        on_summary(summary, len(older))
+    return new_chat, True
 
 
 def _response_parts(response):
@@ -245,41 +342,106 @@ def answer_text(response):
     return "".join(chunks).strip() or (response.text or "").strip()
 
 
+def _retry_after_error(exc, attempt):
+    """Handles a transient send error: sleeps before a retry, or re-raises / exits when the
+    error is fatal or the retries are spent. Shared by the blocking and streaming senders."""
+    if isinstance(exc, errors.ServerError):
+        if attempt == SEND_RETRIES:
+            raise exc
+        print(f"  [gemini] service unavailable ({exc.code}), retrying...")
+        time.sleep(RETRY_DELAY_S * attempt)
+        return
+    if isinstance(exc, errors.ClientError):
+        # Not all models accept the request for reasoning summaries. The API's raw message
+        # does not say what needs changing, so we translate it.
+        if exc.code == 400 and "thinking" in str(exc).lower():
+            sys.exit(
+                f"The model {MODEL} does not accept reasoning summaries.\n"
+                "Start again with COFLIPPER_THOUGHTS=0: the chain will show the "
+                "executed commands, but without the model's explanations."
+            )
+        if exc.code != 429:
+            raise exc
+        # A 429 with 'limit: 0' does not mean a quota we consumed ourselves, but a model
+        # that is not available at all on the current plan: retrying is pointless.
+        if "limit: 0" in str(exc):
+            sys.exit(
+                f"The model {MODEL} is not available on this API key's plan.\n"
+                "Choose another one through the COFLIPPER_MODEL environment variable "
+                "(list_models.py shows what exists)."
+            )
+        if attempt == SEND_RETRIES:
+            raise exc
+        print("  [gemini] request limit reached, waiting...")
+        time.sleep(RETRY_DELAY_S * attempt * 5)
+        return
+    raise exc
+
+
 def send_with_retry(chat, message):
+    """A blocking send, retrying transient errors. Used by the subagents and the summariser,
+    which consume a whole response at once rather than streaming it."""
     for attempt in range(1, SEND_RETRIES + 1):
         try:
             return chat.send_message(message)
-        except errors.ServerError as exc:
-            if attempt == SEND_RETRIES:
-                raise
-            print(f"  [gemini] service unavailable ({exc.code}), retrying...")
-            time.sleep(RETRY_DELAY_S * attempt)
-        except errors.ClientError as exc:
-            # Not all models accept the request for reasoning summaries. The API's raw
-            # message does not say what needs changing, so we translate it.
-            if exc.code == 400 and "thinking" in str(exc).lower():
-                sys.exit(
-                    f"The model {MODEL} does not accept reasoning summaries.\n"
-                    "Start again with COFLIPPER_THOUGHTS=0: the chain will show the "
-                    "executed commands, but without the model's explanations."
-                )
-            if exc.code != 429:
-                raise
-            # A 429 with 'limit: 0' does not mean a quota we consumed ourselves, but a
-            # model that is not available at all on the current plan: retrying is pointless.
-            if "limit: 0" in str(exc):
-                sys.exit(
-                    f"The model {MODEL} is not available on this API key's plan.\n"
-                    "Choose another one through the COFLIPPER_MODEL environment variable "
-                    "(list_models.py shows what exists)."
-                )
-            if attempt == SEND_RETRIES:
-                raise
-            print("  [gemini] request limit reached, waiting...")
-            time.sleep(RETRY_DELAY_S * attempt * 5)
+        except errors.APIError as exc:
+            _retry_after_error(exc, attempt)
 
 
-def run_turn(chat, dispatcher, message, on_step=None):
+# A stream that yielded nothing (the request produced no content at all).
+_STREAM_END = object()
+
+
+def _open_stream_with_retry(chat, message):
+    """Opens a streaming response and pulls its first chunk, retrying transient errors the
+    same way send_with_retry does - they surface as the request is made and first read."""
+    for attempt in range(1, SEND_RETRIES + 1):
+        try:
+            stream = chat.send_message_stream(message)
+            first = next(stream, _STREAM_END)
+            return stream, first
+        except errors.APIError as exc:
+            _retry_after_error(exc, attempt)
+
+
+def _consume_stream(stream, first, on_thought_delta=None, on_answer_delta=None):
+    """Reads a streamed round, emitting text as it arrives, and returns what it amounts to.
+
+    Returns (thoughts, answer, calls): the reasoning summaries (each a full string), the
+    answer text, and the tool calls requested. The deltas are forwarded live through the two
+    callbacks, which is what gives the interface its typing feel; the return value is what the
+    turn loop acts on, exactly as if the response had arrived whole.
+    """
+    thoughts, current, answer, calls = [], [], [], []
+
+    def flush_thought():
+        if current:
+            thoughts.append("".join(current))
+            current.clear()
+
+    chunks = [] if first is _STREAM_END else itertools.chain([first], stream)
+    for chunk in chunks:
+        for part in _response_parts(chunk):
+            if getattr(part, "thought", False) and getattr(part, "text", None):
+                current.append(part.text)
+                if on_thought_delta:
+                    on_thought_delta(part.text)
+            elif getattr(part, "function_call", None):
+                continue  # collected from chunk.function_calls, below
+            elif getattr(part, "text", None):
+                # A switch from reasoning to answer ends the current thought.
+                flush_thought()
+                answer.append(part.text)
+                if on_answer_delta:
+                    on_answer_delta(part.text)
+        for call in getattr(chunk, "function_calls", None) or []:
+            flush_thought()
+            calls.append(call)
+    flush_thought()
+    return thoughts, "".join(answer), calls
+
+
+def run_turn(chat, dispatcher, message, on_step=None, on_delta=None):
     """One conversation turn, building the reasoning chain as it goes.
 
     A turn is not a single exchange of messages: the model may ask for a measurement,
@@ -291,7 +453,10 @@ def run_turn(chat, dispatcher, message, on_step=None):
     so the delegated work stays visible instead of collapsing into a single opaque result.
 
     on_step(step) is called for every step as soon as it happens, so the display grows in
-    real time rather than only at the end of the turn.
+    real time rather than only at the end of the turn. on_delta(channel, text) is called
+    with each streamed fragment of text - channel 'thought' while the model reasons, channel
+    'answer' as it phrases the reply - which is what lets the interface type the answer out
+    live instead of showing it whole at the end.
 
     Returns (answer, chain).
     """
@@ -325,19 +490,32 @@ def run_turn(chat, dispatcher, message, on_step=None):
         elif kind == "report":
             record(trace.add_report(fields["name"], fields["text"], fields["meta"], depth=1))
 
+    def thought_delta(text):
+        if on_delta:
+            on_delta("thought", text)
+
+    def answer_delta(text):
+        if on_delta:
+            on_delta("answer", text)
+
     record(trace.first)
-    response = send_with_retry(chat, message)
+    pending = message
+    reply = ""
 
     while True:
         trace.next_round()
-        for thought in thought_texts(response):
+        stream, first = _open_stream_with_retry(chat, pending)
+        thoughts, answer, calls = _consume_stream(stream, first, thought_delta, answer_delta)
+
+        for thought in thoughts:
             record(trace.add_thought(thought))
 
-        if not response.function_calls:
+        if not calls:
+            reply = answer.strip()
             break
 
         results = []
-        for call in response.function_calls:
+        for call in calls:
             args = dict(call.args or {})
             outcome = dispatcher.dispatch(call.name, call.args, on_subagent_event=subagent_event)
             # A delegated call has already reported itself through subagent_event, spawn
@@ -347,9 +525,8 @@ def run_turn(chat, dispatcher, message, on_step=None):
             results.append(
                 types.Part.from_function_response(name=call.name, response=outcome)
             )
-        response = send_with_retry(chat, results)
+        pending = results
 
-    reply = answer_text(response)
     record(trace.add_answer(reply))
     return reply, trace
 
@@ -381,7 +558,10 @@ def main():
     else:
         flipper = build_client_for_device()
 
-    dispatcher = CommandDispatcher(commands, flipper)
+    from memory import MemoryStore
+
+    memory = MemoryStore()
+    dispatcher = CommandDispatcher(commands, flipper, memory=memory)
     # Imported here rather than at module level: subagents.py imports this module, so a
     # top-level import in both directions would be circular.
     from subagents import SubagentRunner
@@ -389,7 +569,11 @@ def main():
     dispatcher.subagents = SubagentRunner(api_key, dispatcher, dispatcher.simulated)
     # genai_client is not used directly, but the reference has to be kept for as long as
     # the conversation lasts (see build_chat).
-    genai_client, chat = build_chat(api_key, commands, dispatcher.simulated)  # noqa: F841
+    genai_client, chat = build_chat(  # noqa: F841
+        api_key, commands, dispatcher.simulated, memory.as_prompt()
+    )
+    if memory.count:
+        print(f"Persistent memory: {memory.count} fact(s) remembered from earlier sessions.")
 
     names = ", ".join(cmd["name"] for cmd in commands)
     print(f"Tools available to the model: {names}")
@@ -403,6 +587,8 @@ def main():
         elif step.kind == TOOL:
             print(f"  {indent}[flipper] {step.name} {step.arg_line()}".rstrip())
             print(f"  {indent}[flipper] -> {step.result_line()}")
+            for url in step.visited:
+                print(f"  {indent}[web] visited {url}")
         elif step.kind == SPAWN:
             print(f"  [subagent] {step.name} summoned: {step.meta.get('role', '')}")
             print(f"  [subagent] model {step.meta.get('model')}, "
@@ -413,6 +599,9 @@ def main():
         elif step.kind == ANSWER:
             print(f"  [agent] answer phrased after {step.at_s:.1f} s")
 
+    def on_summary(_summary, dropped):
+        print(f"  [context] conversation compacted: {dropped} older entries summarised")
+
     try:
         while True:
             message = input("> ").strip()
@@ -420,6 +609,11 @@ def main():
                 continue
             reply, _trace = run_turn(chat, dispatcher, message, log_step)
             print(reply)
+            # After each turn, compact if the history has grown past the budget. The memory
+            # is re-read so a fact remembered mid-session is folded into the rebuilt chat.
+            chat, _compacted = maybe_compact(
+                genai_client, chat, commands, dispatcher.simulated, memory.as_prompt(), on_summary
+            )
     except KeyboardInterrupt:
         print("\nSession stopped.")
     finally:

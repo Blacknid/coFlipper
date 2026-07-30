@@ -30,7 +30,20 @@ Note that `loader close` has no effect on this application — the loader report
 
 ## Verification status
 
-The application has been compiled, installed, and tested on a physical Flipper Zero. The commands the firmware actually handles are the four in `cfp_dispatch` (`cfp_app.c`): `ping` and `info` return real device data, `subghz.rssi` returns a real measurement taken with the CC1101 (the frequency the synthesizer produced, plus the peak signal level), and `exit` closes the application remotely. Anything else — including the commands from `commands.json` that are still at the design stage — falls through to the single `else` branch and produces `ERR unknown_command`; the firmware has no `not_implemented` code and never emits one. Malformed requests are reported separately: a frame without both an identifier and a command gives `ERR bad_frame`, and `subghz.rssi` gives `ERR missing_frequency` or `ERR invalid_frequency`.
+Not every command in `cfp_dispatch` (`cfp_app.c`) has reached the same level of verification, so they are listed here by what has actually been done with them, rather than as one undifferentiated set.
+
+Compiled, installed and tested on a physical Flipper Zero:
+
+- `ping` and `info` return real device data;
+- `subghz.rssi` returns a real measurement taken with the CC1101 (the frequency the synthesizer produced, plus the peak signal level);
+- the IR bruteforce (`ir.queue`, `ir.bruteforce`, `ir.status`, `ir.reset`) transmits real codes through the IR LED and reacts to the OK button, as the on-screen progress bar shows;
+- `exit` closes the application remotely.
+
+Written against the documented `furi_hal_serial` API but NOT yet built or flashed, and not yet exercised against a real board:
+
+- the Wi-Fi dev board bridge (`cfp_is_board_command` / `cfp_forward_to_board` and the `CfpBoardBridge` setup). It forwards any `wifi.*` / `ble.*` frame out the USART and relays the board's reply. This path needs the companion CFP bridge on the ESP32 (see [/PROTOCOL.md](../PROTOCOL.md)) to answer; until it is built and tested on hardware, treat it as designed rather than verified. Without a board attached it answers `ERR wifi_board_not_connected`, which is the one branch of it that can be reasoned about without the hardware. The desktop side, the protocol and the Marauder simulator for this feature are complete and are exercised end to end by the desktop test suite.
+
+Anything not handled at all — the `commands.json` entries still at the design stage — falls through to the single `else` branch and produces `ERR unknown_command`; the firmware has no `not_implemented` code and never emits one. Malformed requests are reported separately: a frame without both an identifier and a command gives `ERR bad_frame`, and `subghz.rssi` gives `ERR missing_frequency` or `ERR invalid_frequency`.
 
 ## Two observations useful for further development
 

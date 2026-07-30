@@ -110,6 +110,14 @@ def _fetch(url):
         raise IrdbError(f"could not reach the IR database ({exc})") from exc
 
 
+def remote_url(path):
+    """The full CDN URL of a remote file, the address codes_from_remote actually fetches.
+
+    Used to report which files an online lookup consulted, so the chain can show where the
+    codes came from rather than presenting them as if they had always been known."""
+    return f"{BASE}/{urllib.parse.quote(path)}"
+
+
 def load_index(refresh=False):
     """The list of every remote file in the database, fetched once per session."""
     global _index_cache

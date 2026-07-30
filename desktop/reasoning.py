@@ -59,6 +59,13 @@ class Step:
     def simulated(self):
         return bool(self.outcome.get("simulated"))
 
+    @property
+    def visited(self):
+        """The URLs this step reached over the network, when it did. The agent controls a
+        device rather than browsing, so the only online access is the IR-code database
+        consulted during an online IR search; those files show up here."""
+        return list(self.outcome.get("visited") or [])
+
     def arg_line(self):
         return " ".join(f"{key}={value}" for key, value in self.args.items())
 
